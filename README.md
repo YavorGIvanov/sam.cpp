@@ -2,21 +2,17 @@
 
 Inference of Meta's [Segment Anything Model](https://github.com/facebookresearch/segment-anything/) in pure C/C++
 
-## Description
-
-Sam.cpp currently only supports the [ViT-B SAM model checkpoint](https://huggingface.co/facebook/sam-vit-base).
-
 ## Next steps
 
 - [ ] Reduce memory usage by utilizing the new ggml-alloc
 - [ ] Remove redundant graph nodes
 - [ ] Make inference faster
-- [ ] Fix the difference in output masks compared to the PyTorch implementation
+- [X] Fix the difference in output masks compared to the PyTorch implementation
 - [X] Filter masks based on stability score
 - [ ] Add support for user input
 - [ ] Support F16 for heavy F32 ops
 - [ ] Test quantization
-- [ ] Support bigger model checkpoints
+- [X] Support bigger model checkpoints
 - [ ] GPU support
 
 ## Quick start
