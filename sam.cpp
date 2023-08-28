@@ -1458,8 +1458,10 @@ prompt_encoder_result sam_encode_prompt(
 
     //printf("used_mem = %zu\n", ggml_used_mem(ctx0));
 
-    return { embd_prompt_sparse, embd_prompt_dense };
-}
+    prompt_encoder_result res;
+    res.embd_prompt_sparse = embd_prompt_sparse;
+    res.embd_prompt_dense  = embd_prompt_dense;
+    return res;}
 
 struct ggml_tensor* sam_decode_mask_transformer_attn(
     const sam_layer_dec_transformer_attn & attn,
