@@ -4,7 +4,7 @@ Inference of Meta's [Segment Anything Model](https://github.com/facebookresearch
 
 ## Next steps
 
-- [ ] Reduce memory usage by utilizing the new ggml-alloc
+- [X] Reduce memory usage by utilizing the new ggml-alloc
 - [ ] Remove redundant graph nodes
 - [ ] Make inference faster
 - [X] Fix the difference in output masks compared to the PyTorch implementation
