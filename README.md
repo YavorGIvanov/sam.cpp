@@ -21,7 +21,7 @@ git clone --recursive https://github.com/YavorGIvanov/sam.cpp
 cd sam.cpp
 
 # Convert PTH model to ggml
-python convert-pth-to-ggml.py checkpoints/sam_vit_b_01ec64.pth 1
+python convert-pth-to-ggml.py checkpoints/sam_vit_b_01ec64.pth . 1
 
 # Build sam.cpp
 mkdir build && cd build
@@ -37,7 +37,7 @@ You can download a [model checkpoint](https://github.com/facebookresearch/segmen
 
 ```
 # Convert PTH model to ggml
-python convert-pth-to-ggml.py sam_vit_b_01ec64.pth 1
+python convert-pth-to-ggml.py sam_vit_b_01ec64.pth . 1
 ```
 
 ## Example output
