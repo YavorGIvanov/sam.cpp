@@ -236,8 +236,12 @@ struct sam_state {
     // buffer for `ggml_graph_plan.work_data`
     std::vector<uint8_t> work_buffer;
     // buffers to evaluate the model
-    std::vector<uint8_t> buf_alloc;
-    std::vector<uint8_t> buf_compute;
+    std::vector<uint8_t> buf_alloc_img_enc;
+    std::vector<uint8_t> buf_compute_img_enc;
+
+    std::vector<uint8_t> buf_alloc_fast;
+    std::vector<uint8_t> buf_compute_fast;
+
     struct ggml_allocr  * allocr = {};
 };
 
@@ -1142,11 +1146,10 @@ struct ggml_tensor* sam_layer_norm_2d(
     return layer;
 }
 
-bool sam_encode_image(
+struct ggml_cgraph  * sam_encode_image(
             const sam_model & model,
                   sam_state & state,
-        const sam_image_f32 & img,
-                        int   n_threads) {
+        const sam_image_f32 & img) {
 
     const auto & hparams = model.hparams;
     const auto & enc     = model.enc_img;
@@ -1159,30 +1162,18 @@ bool sam_encode_image(
     const int32_t n_img_size    = hparams.n_img_size();
     const int32_t n_window_size = hparams.n_window_size();
 
-    const size_t tensor_alignment = 32;
-
-    static size_t buf_size = 256u*1024*1024;
-    static void * buf = malloc(buf_size);
-
-    // use 2 scratch buffers
-    // TODO: very hacky solution - reimplement in a more elegant way
-    static size_t scr0_size = 2048u*1024*1024;
-    static void * scr0 = malloc(scr0_size);
-
-    static size_t scr1_size = 512u*1024*1024;
-    static void * scr1 = malloc(scr1_size);
-
-    struct ggml_init_params params = {
-        /*.mem_size   =*/ buf_size,
-        /*.mem_buffer =*/ buf,
-        /*.no_alloc   =*/ false,
+    struct ggml_init_params ggml_params = {
+        /*.mem_size   =*/ state.buf_compute_img_enc.size(),
+        /*.mem_buffer =*/ state.buf_compute_img_enc.data(),
+        /*.no_alloc   =*/ true, // skip allocating as we use ggml_alloc to allocate exact memory requirements
     };
 
-    struct ggml_context * ctx0 = ggml_init(params);
-    struct ggml_cgraph gf = {};
+    struct ggml_context * ctx0   = ggml_init(ggml_params);
+    struct ggml_cgraph  * gf     = ggml_new_graph(ctx0);
 
     struct ggml_tensor * inp = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, n_img_size, n_img_size, 3, 1);
-    {
+    ggml_allocr_alloc(state.allocr, inp);
+    if (!ggml_allocr_is_measure(state.allocr)) {
         float * data = (float *) ggml_get_data(inp);
 
         const int nx = img.nx;
@@ -1226,8 +1217,6 @@ bool sam_encode_image(
     for (int il = 0; il < n_enc_layer; ++il) {
         const auto & layer = enc.layers[il];
 
-        ggml_set_scratch(ctx0, { 0, scr0_size, scr0, });
-
         // norm
         // ref: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/image_encoder.py#L168
         {
@@ -1252,8 +1241,6 @@ bool sam_encode_image(
 
         const int64_t W = cur->ne[1];
         const int64_t H = cur->ne[2];
-
-        ggml_set_scratch(ctx0, { 0, scr1_size, scr1, });
 
         // self-attention
         {
@@ -1289,8 +1276,6 @@ bool sam_encode_image(
             V = ggml_reshape_4d(ctx0, V,   n_enc_head_dim, n_enc_head, W*H, B);
             V = ggml_cont      (ctx0, ggml_permute(ctx0, V, 1, 2, 0, 3)); // transposed
             V = ggml_reshape_3d(ctx0, V,   W*H, n_enc_head_dim, B*n_enc_head);
-
-            ggml_set_scratch(ctx0, { 0, scr0_size, scr0, });
 
             struct ggml_tensor * KQ = ggml_mul_mat(ctx0, K, Q);
 
@@ -1341,8 +1326,6 @@ bool sam_encode_image(
 
         cur = ggml_add(ctx0, inpL, cur);
 
-        ggml_set_scratch(ctx0, { 0, scr1_size, scr1, });
-
         struct ggml_tensor * inpFF = cur;
 
         // feed-forward network
@@ -1384,8 +1367,6 @@ bool sam_encode_image(
         inpL = ggml_add(ctx0, cur, inpFF);
     }
 
-    ggml_set_scratch(ctx0, { 0, scr0_size, scr0, });
-
     cur = ggml_cont(ctx0, ggml_permute(ctx0, inpL, 2, 0, 1, 3));
 
     cur = ggml_conv_2d_sk_p0(ctx0, enc.neck_conv_0, cur);
@@ -1396,21 +1377,16 @@ bool sam_encode_image(
 
     cur = sam_layer_norm_2d(ctx0, cur, n_enc_out_chans, enc.neck_norm_1_w, enc.neck_norm_1_b, hparams.eps);
 
-    // TODO: avoid copy
     cur = ggml_cpy(ctx0, cur, state.embd_img);
 
-    ggml_set_scratch(ctx0, { 0, 0, nullptr, });
-
-    // run the computation
-    ggml_build_forward_expand(&gf, cur);
-    ggml_graph_compute_with_ctx(ctx0, &gf, n_threads);
-
+    ggml_build_forward_expand(gf, cur);
     ggml_disconnect_node_from_graph(state.embd_img);
 
     //ggml_graph_print(&gf);
 
     ggml_free(ctx0);
-    return true;
+
+    return gf;
 }
 
 
@@ -1618,8 +1594,6 @@ bool sam_decode_mask(
     const auto & hparams = model.hparams;
     const auto & dec = model.dec;
     const int n_img_embd = hparams.n_img_embd();
-
-    // print_t_f32("embd_img", state.embd_img);
 
     struct ggml_tensor * tokens = {};
     {
@@ -2024,8 +1998,8 @@ struct ggml_cgraph  * sam_build_fast_graph(
                   sam_point   point) {
 
     struct ggml_init_params ggml_params = {
-        /*.mem_size   =*/ state.buf_compute.size(),
-        /*.mem_buffer =*/ state.buf_compute.data(),
+        /*.mem_size   =*/ state.buf_compute_fast.size(),
+        /*.mem_buffer =*/ state.buf_compute_fast.data(),
         /*.no_alloc   =*/ true, // skip allocating as we use ggml_alloc to allocate exact memory requirements
     };
 
@@ -2174,58 +2148,84 @@ int main(int argc, char ** argv) {
     }
 
 
-    if (!sam_encode_image(model, state, img1, params.n_threads)) {
-        fprintf(stderr, "%s: failed to encode image\n", __func__);
-        return 1;
-    }
-
+    static const size_t tensor_alignment = 32;
     {
-        static const size_t tensor_alignment = 32;
-        state.buf_compute.resize(ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead());
+        state.buf_compute_img_enc.resize(ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead());
+        state.allocr = ggml_allocr_new_measure(tensor_alignment);
+        struct ggml_cgraph * gf_measure = sam_encode_image(model, state, img1);
+        if (!gf_measure) {
+            fprintf(stderr, "%s: failed to encode image\n", __func__);
+            return 1;
+        }
+
+        size_t alloc_size = ggml_allocr_alloc_graph(state.allocr, gf_measure) + tensor_alignment;
+        ggml_allocr_free(state.allocr);
+
+        // recreate allocator with exact memory requirements
+        state.buf_alloc_img_enc.resize(alloc_size);
+        state.allocr = ggml_allocr_new(state.buf_alloc_img_enc.data(), state.buf_alloc_img_enc.size(), tensor_alignment);
+
+        // compute the graph with the measured exact memory requirements from above
+        ggml_allocr_reset(state.allocr);
+
+        struct ggml_cgraph  * gf = sam_encode_image(model, state, img1);
+        if (!gf) {
+            fprintf(stderr, "%s: failed to encode image\n", __func__);
+            return 1;
+        }
+
+        ggml_allocr_alloc_graph(state.allocr, gf);
+
+        ggml_graph_compute_helper(state.work_buffer, gf, params.n_threads);
+
+        print_t_f32("embd_img", state.embd_img);
+
+        ggml_allocr_free(state.allocr);
+        state.allocr = NULL;
+        state.work_buffer.clear();
+    }
+    {
+        state.buf_compute_fast.resize(ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead());
         state.allocr = ggml_allocr_new_measure(tensor_alignment);
 
         // TODO: user input
         const sam_point pt = { 414.375f, 162.796875f, };
-        {
-            // measure memory requirements for the graph
-            struct ggml_cgraph  * gf = sam_build_fast_graph(model, state, img0.nx, img0.ny, pt);
-            if (!gf) {
-                fprintf(stderr, "%s: failed to build fast graph to measure\n", __func__);
-                return 1;
-            }
-
-            size_t alloc_size = ggml_allocr_alloc_graph(state.allocr, gf) + tensor_alignment;
-            ggml_allocr_free(state.allocr);
-
-            // recreate allocator with exact memory requirements
-            state.buf_alloc.resize(alloc_size);
-            state.allocr = ggml_allocr_new(state.buf_alloc.data(), state.buf_alloc.size(), tensor_alignment);
-        }
-
-        {
-            // compute the graph with the measured exact memory requirements from above
-            ggml_allocr_reset(state.allocr);
-
-            struct ggml_cgraph  * gf = sam_build_fast_graph(model, state, img0.nx, img0.ny, pt);
-            if (!gf) {
-                fprintf(stderr, "%s: failed to build fast graph\n", __func__);
-                return 1;
-            }
-
-            ggml_allocr_alloc_graph(state.allocr, gf);
-
-            ggml_graph_compute_helper(state.work_buffer, gf, params.n_threads);
-
-            //print_t_f32("iou_predictions", state.iou_predictions);
-            //print_t_f32("low_res_masks", state.low_res_masks);
-        }
-
-        if (!sam_write_masks(model.hparams, img0.nx, img0.ny, state)) {
-            fprintf(stderr, "%s: failed to write masks\n", __func__);
+        // measure memory requirements for the graph
+        struct ggml_cgraph  * gf_measure = sam_build_fast_graph(model, state, img0.nx, img0.ny, pt);
+        if (!gf_measure) {
+            fprintf(stderr, "%s: failed to build fast graph to measure\n", __func__);
             return 1;
         }
 
+        size_t alloc_size = ggml_allocr_alloc_graph(state.allocr, gf_measure) + tensor_alignment;
         ggml_allocr_free(state.allocr);
+
+        // recreate allocator with exact memory requirements
+        state.buf_alloc_fast.resize(alloc_size);
+        state.allocr = ggml_allocr_new(state.buf_alloc_fast.data(), state.buf_alloc_fast.size(), tensor_alignment);
+
+        // compute the graph with the measured exact memory requirements from above
+        ggml_allocr_reset(state.allocr);
+
+        struct ggml_cgraph  * gf = sam_build_fast_graph(model, state, img0.nx, img0.ny, pt);
+        if (!gf) {
+            fprintf(stderr, "%s: failed to build fast graph\n", __func__);
+            return 1;
+        }
+
+        ggml_allocr_alloc_graph(state.allocr, gf);
+
+        ggml_graph_compute_helper(state.work_buffer, gf, params.n_threads);
+
+        //print_t_f32("iou_predictions", state.iou_predictions);
+        //print_t_f32("low_res_masks", state.low_res_masks);
+        ggml_allocr_free(state.allocr);
+        state.allocr = NULL;
+    }
+
+    if (!sam_write_masks(model.hparams, img0.nx, img0.ny, state)) {
+        fprintf(stderr, "%s: failed to write masks\n", __func__);
+        return 1;
     }
 
     // report timing
