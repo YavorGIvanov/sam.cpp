@@ -8,6 +8,12 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+#include "imgui-extra/imgui_impl.h"
+
+#define SDL_DISABLE_ARM_NEON_H 1
+#include <SDL.h>
+#include <SDL_opengl.h>
+
 #include <string>
 #include <thread>
 
@@ -39,6 +45,8 @@ static bool sam_image_load_from_file(const std::string & fname, sam_image_u8 & i
 
     return true;
 }
+
+static const size_t tensor_alignment = 32;
 
 struct sam_params {
     int32_t seed      = -1; // RNG seed
@@ -92,14 +100,261 @@ static bool sam_params_parse(int argc, char ** argv, sam_params & params) {
     return true;
 }
 
+bool ImGui_BeginFrame(SDL_Window * window) {
+    ImGui_NewFrame(window);
+
+    return true;
+}
+
+bool ImGui_EndFrame(SDL_Window * window) {
+    // Rendering
+    int display_w, display_h;
+    SDL_GetWindowSize(window, &display_w, &display_h);
+    glViewport(0, 0, display_w, display_h);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    ImGui::Render();
+    ImGui_RenderDrawData(ImGui::GetDrawData());
+
+    SDL_GL_SwapWindow(window);
+
+    return true;
+}
+
+GLuint createGLTexture(const sam_image_u8 & img, GLint format) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    // Setup filtering parameters for display
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); // This is required on WebGL for non power-of-two textures
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); // Same
+
+    // Upload pixels into texture
+#if defined(GL_UNPACK_ROW_LENGTH) && !defined(__EMSCRIPTEN__)
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+#endif
+    glTexImage2D(GL_TEXTURE_2D, 0, format, img.nx, img.ny, 0, format, GL_UNSIGNED_BYTE, img.data.data());
+
+    return tex;
+}
+
+bool load_model_and_compute_embd_img(const sam_image_u8 & img, const sam_params & params, sam_model & model, sam_state & state, int64_t & t_load_us) {
+    // preprocess to f32
+    sam_image_f32 img1;
+    if (!sam_image_preprocess(img, img1)) {
+        fprintf(stderr, "%s: failed to preprocess image\n", __func__);
+        return false;
+    }
+    fprintf(stderr, "%s: preprocessed image (%d x %d)\n", __func__, img1.nx, img1.ny);
+
+    // load the model
+    {
+        const int64_t t_start_us = ggml_time_us();
+
+        if (!sam_model_load(params.model, model)) {
+            fprintf(stderr, "%s: failed to load model from '%s'\n", __func__, params.model.c_str());
+            return false;
+        }
+
+        t_load_us = ggml_time_us() - t_start_us;
+    }
+
+    sam_state_init_img(model, state);
+
+    // Encode the image
+    {
+        state.buf_compute_img_enc.resize(ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead());
+        state.allocr = ggml_allocr_new_measure(tensor_alignment);
+        struct ggml_cgraph * gf_measure = sam_encode_image(model, state, img1);
+        if (!gf_measure) {
+            fprintf(stderr, "%s: failed to encode image\n", __func__);
+            return false;
+        }
+
+        size_t alloc_size = ggml_allocr_alloc_graph(state.allocr, gf_measure) + tensor_alignment;
+        ggml_allocr_free(state.allocr);
+
+        // recreate allocator with exact memory requirements
+        state.buf_alloc_img_enc.resize(alloc_size);
+        state.allocr = ggml_allocr_new(state.buf_alloc_img_enc.data(), state.buf_alloc_img_enc.size(), tensor_alignment);
+
+        // compute the graph with the measured exact memory requirements from above
+        ggml_allocr_reset(state.allocr);
+
+        struct ggml_cgraph  * gf = sam_encode_image(model, state, img1);
+        if (!gf) {
+            fprintf(stderr, "%s: failed to encode image\n", __func__);
+            return false;
+        }
+
+        ggml_allocr_alloc_graph(state.allocr, gf);
+
+        ggml_graph_compute_helper(state.work_buffer, gf, params.n_threads);
+
+        ggml_allocr_free(state.allocr);
+        state.allocr = NULL;
+        state.work_buffer.clear();
+    }
+
+    return true;
+}
+
+std::map<std::string, sam_image_u8> compute_masks(const sam_image_u8 & img, const sam_params & params, sam_point pt, sam_model & model, sam_state & state) {
+    {
+        state.buf_compute_fast.resize(ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead());
+        state.allocr = ggml_allocr_new_measure(tensor_alignment);
+
+        // measure memory requirements for the graph
+        struct ggml_cgraph  * gf_measure = sam_build_fast_graph(model, state, img.nx, img.ny, pt);
+        if (!gf_measure) {
+            fprintf(stderr, "%s: failed to build fast graph to measure\n", __func__);
+            return {};
+        }
+
+        size_t alloc_size = ggml_allocr_alloc_graph(state.allocr, gf_measure) + tensor_alignment;
+        ggml_allocr_free(state.allocr);
+
+        // recreate allocator with exact memory requirements
+        state.buf_alloc_fast.resize(alloc_size);
+        state.allocr = ggml_allocr_new(state.buf_alloc_fast.data(), state.buf_alloc_fast.size(), tensor_alignment);
+
+        // compute the graph with the measured exact memory requirements from above
+        ggml_allocr_reset(state.allocr);
+
+        struct ggml_cgraph  * gf = sam_build_fast_graph(model, state, img.nx, img.ny, pt);
+        if (!gf) {
+            fprintf(stderr, "%s: failed to build fast graph\n", __func__);
+            return {};
+        }
+
+        ggml_allocr_alloc_graph(state.allocr, gf);
+
+        ggml_graph_compute_helper(state.work_buffer, gf, params.n_threads);
+
+        //print_t_f32("iou_predictions", state.iou_predictions);
+        //print_t_f32("low_res_masks", state.low_res_masks);
+        ggml_allocr_free(state.allocr);
+        state.allocr = NULL;
+        state.buf_compute_fast.clear();
+        state.buf_alloc_fast.clear();
+    }
+
+    std::map<std::string, sam_image_u8> masks = sam_postprocess_masks(model.hparams, img.nx, img.ny, state);
+    if (masks.empty()) {
+        fprintf(stderr, "%s: failed to postprocess masks\n", __func__);
+    }
+
+    return masks;
+}
+
+int main_loop(sam_image_u8 & img, const sam_params & params, sam_model & model, sam_state & state) {
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        fprintf(stderr, "Error: %s\n", SDL_GetError());
+        return -1;
+    }
+
+    ImGui_PreInit();
+
+    const char * windowTitle = "SAM.cpp";
+    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
+    SDL_Window * window = SDL_CreateWindow(windowTitle, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, img.nx, img.ny, window_flags);
+    if (!window) {
+        fprintf(stderr, "Error: %s\n", SDL_GetError());
+        return -1;
+    }
+
+    void * gl_context = SDL_GL_CreateContext(window);
+
+    SDL_GL_MakeCurrent(window, gl_context);
+    SDL_GL_SetSwapInterval(1); // Enable vsync
+
+    GLuint tex = createGLTexture(img, GL_RGB);
+
+    ImGui_Init(window, gl_context);
+    ImGui::GetIO().IniFilename = nullptr;
+
+    ImGui_BeginFrame(window);
+    ImGui::NewFrame();
+    ImGui::EndFrame();
+    ImGui_EndFrame(window);
+
+    bool done = false;
+    float x = 0.f, y = 0.f;
+    std::map<std::string, sam_image_u8> masks;
+    std::vector<GLuint> maskTextures;
+    while (!done) {
+        bool hasNewInputPoint = false;
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            ImGui_ProcessEvent(&event);
+            if (event.type == SDL_QUIT) {
+                done = true;
+            }
+            if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(window)) {
+                done = true;
+            }
+            if (event.type == SDL_MOUSEBUTTONDOWN) {
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    hasNewInputPoint = true;
+                    x = event.button.x;
+                    y = event.button.y;
+                }
+            }
+        }
+
+        if (hasNewInputPoint) {
+            sam_point pt;
+            pt.x = x;
+            pt.y = y;
+            printf("pt = (%f, %f)\n", pt.x, pt.y);
+            sam_state_init_masks(model, state);
+            masks = compute_masks(img, params, pt, model, state);
+            if (!maskTextures.empty()) {
+                glDeleteTextures(maskTextures.size(), maskTextures.data());
+                maskTextures.clear();
+            }
+            for (auto& mask : masks) {
+                maskTextures.push_back(createGLTexture(mask.second, GL_LUMINANCE));
+            }
+            ggml_free(state.ctx_masks);
+        }
+
+        ImGui_BeginFrame(window);
+        ImGui::NewFrame();
+        ImGui::SetNextWindowPos(ImVec2(0,0));
+        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+        ImGui::Begin("SAM.cpp", NULL, ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        draw_list->AddImage((void*)(intptr_t)tex, ImVec2(0,0), ImVec2(img.nx, img.ny));
+        int ii = 0;
+        for (auto& maskTex : maskTextures) {
+            bool isRed = ii == 0;
+            bool isGreen = ii == 1;
+            bool isBlue = ii == 2;
+            draw_list->AddImage((void*)(intptr_t)maskTex, ImVec2(0,0), ImVec2(img.nx, img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(isRed ? 255 : 0, isGreen ? 255 : 0, isBlue ? 255 : 0, 128));
+            ++ii;
+        }
+        draw_list->AddCircleFilled(ImVec2(x, y), 5, IM_COL32(255, 0, 0, 255));
+        ImGui::End();
+        ImGui::EndFrame();
+        ImGui_EndFrame(window);
+    }
+
+    SDL_DestroyWindow(window);
+
+    return 0;
+}
+
 int main(int argc, char ** argv) {
     const int64_t t_main_start_us = ggml_time_us();
 
     sam_params params;
     params.model = "models/sam-vit-b/ggml-model-f16.bin";
 
-    sam_model model;
-    sam_state state;
     int64_t t_load_us = 0;
 
     if (sam_params_parse(argc, argv, params) == false) {
@@ -119,145 +374,10 @@ int main(int argc, char ** argv) {
     }
     fprintf(stderr, "%s: loaded image '%s' (%d x %d)\n", __func__, params.fname_inp.c_str(), img0.nx, img0.ny);
 
-    // preprocess to f32
-    sam_image_f32 img1;
-    if (!sam_image_preprocess(img0, img1)) {
-        fprintf(stderr, "%s: failed to preprocess image\n", __func__);
-        return 1;
-    }
-    fprintf(stderr, "%s: preprocessed image (%d x %d)\n", __func__, img1.nx, img1.ny);
-
-
-    // load the model
-    {
-        const int64_t t_start_us = ggml_time_us();
-
-        if (!sam_model_load(params.model, model)) {
-            fprintf(stderr, "%s: failed to load model from '%s'\n", __func__, params.model.c_str());
-            return 1;
-        }
-
-        t_load_us = ggml_time_us() - t_start_us;
-    }
-
-    {
-        static size_t buf_size = 256u*1024*1024;
-
-        struct ggml_init_params ggml_params = {
-            /*.mem_size   =*/ buf_size,
-            /*.mem_buffer =*/ NULL,
-            /*.no_alloc   =*/ false,
-        };
-
-        state.ctx = ggml_init(ggml_params);
-
-        state.embd_img = ggml_new_tensor_3d(state.ctx, GGML_TYPE_F32,
-                model.hparams.n_img_embd(), model.hparams.n_img_embd(), model.hparams.n_enc_out_chans);
-
-        state.low_res_masks = ggml_new_tensor_3d(state.ctx, GGML_TYPE_F32,
-                model.hparams.n_enc_out_chans, model.hparams.n_enc_out_chans, 3);
-
-        state.iou_predictions = ggml_new_tensor_1d(state.ctx, GGML_TYPE_F32, 3);
-    }
-
-
-    static const size_t tensor_alignment = 32;
-    {
-        state.buf_compute_img_enc.resize(ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead());
-        state.allocr = ggml_allocr_new_measure(tensor_alignment);
-        struct ggml_cgraph * gf_measure = sam_encode_image(model, state, img1);
-        if (!gf_measure) {
-            fprintf(stderr, "%s: failed to encode image\n", __func__);
-            return 1;
-        }
-
-        size_t alloc_size = ggml_allocr_alloc_graph(state.allocr, gf_measure) + tensor_alignment;
-        ggml_allocr_free(state.allocr);
-
-        // recreate allocator with exact memory requirements
-        state.buf_alloc_img_enc.resize(alloc_size);
-        state.allocr = ggml_allocr_new(state.buf_alloc_img_enc.data(), state.buf_alloc_img_enc.size(), tensor_alignment);
-
-        // compute the graph with the measured exact memory requirements from above
-        ggml_allocr_reset(state.allocr);
-
-        struct ggml_cgraph  * gf = sam_encode_image(model, state, img1);
-        if (!gf) {
-            fprintf(stderr, "%s: failed to encode image\n", __func__);
-            return 1;
-        }
-
-        ggml_allocr_alloc_graph(state.allocr, gf);
-
-        ggml_graph_compute_helper(state.work_buffer, gf, params.n_threads);
-
-        ggml_allocr_free(state.allocr);
-        state.allocr = NULL;
-        state.work_buffer.clear();
-    }
-
-    {
-        state.buf_compute_fast.resize(ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead());
-        state.allocr = ggml_allocr_new_measure(tensor_alignment);
-
-        // TODO: user input
-        const sam_point pt = { 414.375f, 162.796875f, };
-        // measure memory requirements for the graph
-        struct ggml_cgraph  * gf_measure = sam_build_fast_graph(model, state, img0.nx, img0.ny, pt);
-        if (!gf_measure) {
-            fprintf(stderr, "%s: failed to build fast graph to measure\n", __func__);
-            return 1;
-        }
-
-        size_t alloc_size = ggml_allocr_alloc_graph(state.allocr, gf_measure) + tensor_alignment;
-        ggml_allocr_free(state.allocr);
-
-        // recreate allocator with exact memory requirements
-        state.buf_alloc_fast.resize(alloc_size);
-        state.allocr = ggml_allocr_new(state.buf_alloc_fast.data(), state.buf_alloc_fast.size(), tensor_alignment);
-
-        // compute the graph with the measured exact memory requirements from above
-        ggml_allocr_reset(state.allocr);
-
-        struct ggml_cgraph  * gf = sam_build_fast_graph(model, state, img0.nx, img0.ny, pt);
-        if (!gf) {
-            fprintf(stderr, "%s: failed to build fast graph\n", __func__);
-            return 1;
-        }
-
-        ggml_allocr_alloc_graph(state.allocr, gf);
-
-        ggml_graph_compute_helper(state.work_buffer, gf, params.n_threads);
-
-        //print_t_f32("iou_predictions", state.iou_predictions);
-        //print_t_f32("low_res_masks", state.low_res_masks);
-        ggml_allocr_free(state.allocr);
-        state.allocr = NULL;
-    }
-
-    std::map<std::string, sam_image_u8> masks = sam_postprocess_masks(model.hparams, img0.nx, img0.ny, state);
-    if (masks.empty()) {
-        fprintf(stderr, "%s: failed to postprocess masks\n", __func__);
-        return 1;
-    }
-
-    for (auto& [filename, mask] : masks) {
-        if (!stbi_write_png(filename.c_str(), mask.nx, mask.ny, 1, mask.data.data(), mask.nx)) {
-            printf("%s: failed to write mask %s\n", __func__, filename.c_str());
-            return 1;
-        }
-    }
-
-    // report timing
-    {
-        const int64_t t_main_end_us = ggml_time_us();
-
-        fprintf(stderr, "\n\n");
-        fprintf(stderr, "%s:     load time = %8.2f ms\n", __func__, t_load_us/1000.0f);
-        fprintf(stderr, "%s:    total time = %8.2f ms\n", __func__, (t_main_end_us - t_main_start_us)/1000.0f);
-    }
-
-    ggml_free(model.ctx);
+    sam_model model;
+    sam_state state;
+    load_model_and_compute_embd_img(img0, params, model, state, t_load_us);
+    main_loop(img0, params, model, state);
 
     return 0;
 }

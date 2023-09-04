@@ -775,6 +775,42 @@ bool sam_model_load(const std::string & fname, sam_model & model) {
     return true;
 }
 
+void sam_state_init_img(
+        const sam_model & model,
+        sam_state       & state) {
+    static size_t buf_size = 256u*1024*1024;
+
+    struct ggml_init_params ggml_params = {
+        /*.mem_size   =*/ buf_size,
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ false,
+    };
+
+    state.ctx_img = ggml_init(ggml_params);
+
+    state.embd_img = ggml_new_tensor_3d(state.ctx_img, GGML_TYPE_F32,
+            model.hparams.n_img_embd(), model.hparams.n_img_embd(), model.hparams.n_enc_out_chans);
+}
+
+void sam_state_init_masks(
+        const sam_model & model,
+        sam_state       & state) {
+    static size_t buf_size = 256u*1024*1024;
+
+    struct ggml_init_params ggml_params = {
+        /*.mem_size   =*/ buf_size,
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ false,
+    };
+
+    state.ctx_masks = ggml_init(ggml_params);
+
+    state.low_res_masks = ggml_new_tensor_3d(state.ctx_masks, GGML_TYPE_F32,
+            model.hparams.n_enc_out_chans, model.hparams.n_enc_out_chans, 3);
+
+    state.iou_predictions = ggml_new_tensor_1d(state.ctx_masks, GGML_TYPE_F32, 3);
+}
+
 struct ggml_tensor * sam_fill_dense_pe(
             const sam_model   & model,
           struct ggml_context * ctx0,
@@ -1052,7 +1088,7 @@ struct ggml_cgraph  * sam_encode_image(
 
     cur = sam_layer_norm_2d(ctx0, cur, n_enc_out_chans, enc.neck_norm_1_w, enc.neck_norm_1_b, hparams.eps);
 
-    cur = ggml_cpy(ctx0, cur, state.embd_img);
+    cur = ggml_cpy(state.ctx_img, cur, state.embd_img);
 
     ggml_build_forward_expand(gf, cur);
     ggml_disconnect_node_from_graph(state.embd_img);
@@ -1467,10 +1503,10 @@ bool sam_decode_mask(
 
     // Select the correct mask or masks for output
     // ref: https://github.com/facebookresearch/segment-anything/blob/6fdee8f2727f4506cfbbe553e23b895e27956588/segment_anything/modeling/mask_decoder.py#L101
-    iou_pred = ggml_cpy(state.ctx, ggml_view_1d(ctx0, iou_pred, iou_pred->ne[0] - 1, iou_pred->nb[0]), state.iou_predictions);
+    iou_pred = ggml_cpy(state.ctx_masks, ggml_view_1d(ctx0, iou_pred, iou_pred->ne[0] - 1, iou_pred->nb[0]), state.iou_predictions);
     masks = ggml_view_4d(ctx0, masks, masks->ne[0], masks->ne[1], masks->ne[2] - 1, masks->ne[3],
                                       masks->nb[1], masks->nb[2], masks->nb[3], masks->nb[2] /* offset*/);
-    masks = ggml_cpy(state.ctx, masks, state.low_res_masks);
+    masks = ggml_cpy(state.ctx_masks, masks, state.low_res_masks);
 
     ggml_build_forward_expand(gf, masks);
     ggml_build_forward_expand(gf, iou_pred);
