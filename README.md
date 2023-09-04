@@ -28,7 +28,7 @@ mkdir build && cd build
 cmake .. && make -j4
 
 # run inference
-./bin/sam.cpp -t 16 -i ../img.jpg -m ../checkpoints/ggml-model-f16.bin
+./bin/sam -t 16 -i ../img.jpg -m ../checkpoints/ggml-model-f16.bin
 ```
 
 ## Downloading and converting the model checkpoints
