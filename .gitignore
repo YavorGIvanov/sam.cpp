@@ -33,3 +33,5 @@ zig-cache/
 *.sw?
 
 __pycache__/
+
+checkpoints/

@@ -8,11 +8,15 @@ https://github.com/YavorGIvanov/sam.cpp/assets/1991296/a69be66f-8e27-43a0-8a4d-6
 ```bash
 git clone --recursive https://github.com/YavorGIvanov/sam.cpp
 cd sam.cpp
+```
 
-# Convert PTH model to ggml
+Note: you need to download the model checkpoint below (`sam_vit_b_01ec64.pth`) first from [here](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth) and place it in the `checkpoints` folder
+
+```bash
+# Convert PTH model to ggml. Requires python3, torch and numpy
 python convert-pth-to-ggml.py checkpoints/sam_vit_b_01ec64.pth . 1
 
-# Build sam.cpp
+# Build sam.cpp. Might require cmake and SDL2 to be installed
 mkdir build && cd build
 cmake .. && make -j4
 
