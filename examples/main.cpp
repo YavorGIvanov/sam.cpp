@@ -11,6 +11,10 @@
 #include <SDL.h>
 #include <SDL_opengl.h>
 
+#if defined(_MSC_VER)
+#pragma warning(disable: 4244 4267) // possible loss of data
+#endif
+
 static bool load_image_from_file(const std::string & fname, sam_image_u8 & img) {
     int nx, ny, nc;
     auto data = stbi_load(fname.c_str(), &nx, &ny, &nc, 3);

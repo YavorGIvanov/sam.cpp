@@ -1,15 +1,19 @@
+#define _USE_MATH_DEFINES
 #include "sam.h"
 
 #include "ggml.h"
 #include "ggml-alloc.h"
 
 #include <cassert>
-#define _USE_MATH_DEFINES
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <map>
+
+#if defined(_MSC_VER)
+#pragma warning(disable: 4244 4267) // possible loss of data
+#endif
 
 static const size_t tensor_alignment = 32;
 
@@ -1068,7 +1072,7 @@ struct ggml_tensor * sam_fill_dense_pe(
 
     struct ggml_tensor * cur = ggml_mul_mat(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, enc.pe)), xy_embed_stacked);
 
-    cur = ggml_scale(ctx0, cur, ggml_new_f32(ctx0, 2.0f*M_PI));
+    cur = ggml_scale(ctx0, cur, ggml_new_f32(ctx0, float(2.0f*M_PI)));
 
     // concat
     // ref: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/prompt_encoder.py#L192
@@ -1386,7 +1390,7 @@ prompt_encoder_result sam_encode_prompt(
 
     struct ggml_tensor * cur = ggml_mul_mat(ctx0, ggml_cont(ctx0, ggml_transpose(ctx0, enc.pe)), inp);
 
-    cur = ggml_scale(ctx0, cur, ggml_new_f32(ctx0, 2.0f*M_PI));
+    cur = ggml_scale(ctx0, cur, ggml_new_f32(ctx0, float(2.0f*M_PI)));
 
     // concat
     // ref: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/prompt_encoder.py#L192
