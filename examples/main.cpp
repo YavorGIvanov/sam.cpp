@@ -222,7 +222,15 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
                 maskTextures.clear();
             }
             for (auto& mask : masks) {
-                maskTextures.push_back(createGLTexture(mask, GL_LUMINANCE));
+                sam_image_u8 mask_rgb = { mask.nx, mask.ny, };
+                mask_rgb.data.resize(3*mask.nx*mask.ny);
+                for (int i = 0; i < mask.nx*mask.ny; ++i) {
+                    mask_rgb.data[3*i+0] = mask.data[i];
+                    mask_rgb.data[3*i+1] = mask.data[i];
+                    mask_rgb.data[3*i+2] = mask.data[i];
+                }
+
+                maskTextures.push_back(createGLTexture(mask_rgb, GL_RGB));
             }
         }
 
