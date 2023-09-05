@@ -253,7 +253,7 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
             }
         }
         else if (!maskTextures.empty()) {
-            draw_list->AddImage((void*)(intptr_t)maskTextures[0], ImVec2(0,0), ImVec2(img.nx, img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(0, 0, 255, 96));
+            draw_list->AddImage((void*)(intptr_t)maskTextures[0], ImVec2(0,0), ImVec2(img.nx, img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(0, 0, 255, 128));
         }
 
         draw_list->AddCallback(disable_blending, {});

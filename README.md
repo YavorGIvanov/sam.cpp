@@ -5,15 +5,16 @@ Inference of Meta's [Segment Anything Model](https://github.com/facebookresearch
 ## Next steps
 
 - [X] Reduce memory usage by utilizing the new ggml-alloc
-- [ ] Remove redundant graph nodes
+- [X] Remove redundant graph nodes
 - [ ] Make inference faster
 - [X] Fix the difference in output masks compared to the PyTorch implementation
 - [X] Filter masks based on stability score
-- [ ] Add support for user input
+- [X] Add support for point user input
 - [ ] Support F16 for heavy F32 ops
 - [ ] Test quantization
 - [X] Support bigger model checkpoints
 - [ ] GPU support
+- [ ] Add support for mask and box input
 
 ## Quick start
 ```bash
