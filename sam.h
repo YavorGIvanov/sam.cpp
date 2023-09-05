@@ -2,7 +2,6 @@
 
 #include <vector>
 #include <cstdint>
-#include <map>
 #include <string>
 #include <thread>
 #include <memory>
@@ -47,11 +46,14 @@ bool sam_compute_embd_img(
         int                  n_threads ,
         sam_state          & state);
 
-std::map<std::string, sam_image_u8> sam_compute_masks(
+// returns masks sorted by the sum of the iou_score and stability_score in descending order
+std::vector<sam_image_u8> sam_compute_masks(
         const sam_image_u8 & img,
         int                  n_threads,
         sam_point            pt,
-        sam_state          & state);
+        sam_state          & state,
+        int                  mask_on_val  = 255,
+        int                  mask_off_val = 0);
 
 void sam_deinit(
         sam_state & state);

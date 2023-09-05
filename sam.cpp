@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <map>
 
 static const size_t tensor_alignment = 32;
 
@@ -1744,7 +1745,13 @@ bool sam_decode_mask(
     return true;
 }
 
-std::map<std::string, sam_image_u8> sam_postprocess_masks(const sam_hparams& hparams, int nx, int ny, const sam_ggml_state & state) {
+std::vector<sam_image_u8> sam_postprocess_masks(
+        const sam_hparams    & hparams,
+        int                    nx,
+        int                    ny,
+        const sam_ggml_state & state,
+        int                    mask_on_val,
+        int                    mask_off_val) {
     if (state.low_res_masks->ne[2] == 0) return {};
     if (state.low_res_masks->ne[2] != state.iou_predictions->ne[0]) {
         printf("Error: number of masks (%d) does not match number of iou predictions (%d)\n", (int)state.low_res_masks->ne[2], (int)state.iou_predictions->ne[0]);
@@ -1777,7 +1784,7 @@ std::map<std::string, sam_image_u8> sam_postprocess_masks(const sam_hparams& hpa
 
     const auto iou_data = (float*)state.iou_predictions->data;
 
-    std::map<std::string, sam_image_u8> res_map;
+    std::map<float, sam_image_u8, std::greater<float>> res_map;
     for (int i = 0; i < ne2; ++i) {
         if (iou_threshold > 0.f && iou_data[i] < iou_threshold) {
             printf("Skipping mask %d with iou %f below threshold %f\n", i, iou_data[i], iou_threshold);
@@ -1834,7 +1841,7 @@ std::map<std::string, sam_image_u8> sam_postprocess_masks(const sam_hparams& hpa
 
             res.nx = nx;
             res.ny = ny;
-            res.data.resize(nx*ny);
+            res.data.resize(nx*ny, mask_off_val);
 
             for (int iy = 0; iy < ny; ++iy) {
                 for (int ix = 0; ix < nx; ++ix) {
@@ -1877,7 +1884,7 @@ std::map<std::string, sam_image_u8> sam_postprocess_masks(const sam_hparams& hpa
                         min_ix = std::min(min_ix, ix);
                         max_ix = std::max(max_ix, ix);
 
-                        res.data[iy*nx + ix] = 255;
+                        res.data[iy*nx + ix] = mask_on_val;
                     }
                 }
             }
@@ -1892,11 +1899,15 @@ std::map<std::string, sam_image_u8> sam_postprocess_masks(const sam_hparams& hpa
         printf("Mask %d: iou = %f, stability_score = %f, bbox (%d, %d), (%d, %d)\n",
                 i, iou_data[i], stability_score, min_ix, max_ix, min_iy, max_iy);
 
-        std::string filename = "mask_out_" + std::to_string(i) + ".png";
-        res_map[filename] = std::move(res);
+        res_map[iou_data[i] + stability_score] = std::move(res);
     }
 
-    return res_map;
+    std::vector<sam_image_u8> res;
+    for (auto& mask : res_map) {
+        res.push_back(std::move(mask.second));
+    }
+
+    return res;
 }
 
 struct ggml_cgraph  * sam_build_fast_graph(
@@ -2028,11 +2039,13 @@ bool sam_compute_embd_img(const sam_image_u8 & img, int n_threads, sam_state & s
     return true;
 }
 
-std::map<std::string, sam_image_u8> sam_compute_masks(
+std::vector<sam_image_u8> sam_compute_masks(
         const sam_image_u8 & img,
         int                  n_threads,
         sam_point            pt,
-        sam_state          & state) {
+        sam_state          & state,
+        int                  mask_on_val,
+        int                  mask_off_val) {
     if (!state.model || !state.state) {
         return {};
     }
@@ -2095,7 +2108,7 @@ std::map<std::string, sam_image_u8> sam_compute_masks(
     st.buf_compute_fast.clear();
     st.buf_alloc_fast.clear();
 
-    std::map<std::string, sam_image_u8> masks = sam_postprocess_masks(model.hparams, img.nx, img.ny, st);
+    std::vector<sam_image_u8> masks = sam_postprocess_masks(model.hparams, img.nx, img.ny, st, mask_on_val, mask_off_val);
 
     ggml_free(st.ctx_masks);
     st.ctx_masks = {};

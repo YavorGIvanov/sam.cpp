@@ -114,6 +114,15 @@ GLuint createGLTexture(const sam_image_u8 & img, GLint format) {
     return tex;
 }
 
+void enable_blending(const ImDrawList*, const ImDrawCmd*) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+}
+
+void disable_blending(const ImDrawList*, const ImDrawCmd*) {
+    glDisable(GL_BLEND);
+}
+
 int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "Error: %s\n", SDL_GetError());
@@ -147,10 +156,12 @@ int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) 
 
     bool done = false;
     float x = 0.f, y = 0.f;
-    std::map<std::string, sam_image_u8> masks;
+    std::vector<sam_image_u8> masks;
     std::vector<GLuint> maskTextures;
+    bool segmentOnHover = false;
+    bool outputMultipleMasks = false;
     while (!done) {
-        bool hasNewInputPoint = false;
+        bool computeMasks = segmentOnHover;
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             ImGui_ProcessEvent(&event);
@@ -162,14 +173,18 @@ int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) 
             }
             if (event.type == SDL_MOUSEBUTTONDOWN) {
                 if (event.button.button == SDL_BUTTON_LEFT) {
-                    hasNewInputPoint = true;
+                    computeMasks = true;
                     x = event.button.x;
                     y = event.button.y;
                 }
             }
+            if (segmentOnHover && event.type == SDL_MOUSEMOTION) {
+                x = event.motion.x;
+                y = event.motion.y;
+            }
         }
 
-        if (hasNewInputPoint) {
+        if (computeMasks) {
             sam_point pt { x, y};
             printf("pt = (%f, %f)\n", pt.x, pt.y);
 
@@ -180,7 +195,7 @@ int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) 
                 maskTextures.clear();
             }
             for (auto& mask : masks) {
-                maskTextures.push_back(createGLTexture(mask.second, GL_LUMINANCE));
+                maskTextures.push_back(createGLTexture(mask, GL_LUMINANCE));
             }
         }
 
@@ -192,16 +207,28 @@ int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) 
 
         ImDrawList* draw_list = ImGui::GetWindowDrawList();
         draw_list->AddImage((void*)(intptr_t)tex, ImVec2(0,0), ImVec2(img.nx, img.ny));
-        int ii = 0;
-        for (auto& maskTex : maskTextures) {
-            bool isRed = ii == 0;
-            bool isGreen = ii == 1;
-            bool isBlue = ii == 2;
-            draw_list->AddImage((void*)(intptr_t)maskTex, ImVec2(0,0), ImVec2(img.nx, img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(isRed ? 255 : 0, isGreen ? 255 : 0, isBlue ? 255 : 0, 128));
-            ++ii;
-        }
+
+        ImGui::Checkbox("Segment on hover", &segmentOnHover);
+        ImGui::Checkbox("Output multiple masks", &outputMultipleMasks);
 
         draw_list->AddCircleFilled(ImVec2(x, y), 5, IM_COL32(255, 0, 0, 255));
+
+        draw_list->AddCallback(enable_blending, {});
+
+        if (outputMultipleMasks) {
+            for (int i = 0; i < int(maskTextures.size()); ++i) {
+                const int r = i == 0 ? 255 : 0;
+                const int g = i == 1 ? 255 : 0;
+                const int b = i == 2 ? 255 : 0;
+                draw_list->AddImage((void*)(intptr_t)maskTextures[i], ImVec2(0,0), ImVec2(img.nx, img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(r, g, b, 172));
+            }
+        }
+        else if (!maskTextures.empty()) {
+            draw_list->AddImage((void*)(intptr_t)maskTextures[0], ImVec2(0,0), ImVec2(img.nx, img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(0, 0, 255, 96));
+        }
+
+        draw_list->AddCallback(disable_blending, {});
+
 
         ImGui::End();
         ImGui::EndFrame();
