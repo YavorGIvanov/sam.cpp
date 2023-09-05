@@ -2,19 +2,7 @@
 
 Inference of Meta's [Segment Anything Model](https://github.com/facebookresearch/segment-anything/) in pure C/C++
 
-## Next steps
-
-- [X] Reduce memory usage by utilizing the new ggml-alloc
-- [X] Remove redundant graph nodes
-- [ ] Make inference faster
-- [X] Fix the difference in output masks compared to the PyTorch implementation
-- [X] Filter masks based on stability score
-- [X] Add support for point user input
-- [ ] Support F16 for heavy F32 ops
-- [ ] Test quantization
-- [X] Support bigger model checkpoints
-- [ ] GPU support
-- [ ] Add support for mask and box input
+https://github.com/YavorGIvanov/sam.cpp/assets/1991296/a69be66f-8e27-43a0-8a4d-6cfe3b1d9335
 
 ## Quick start
 ```bash
@@ -98,3 +86,17 @@ Output mask (mask_out_2.png in build folder):
 - [ggml SAM example](https://github.com/ggerganov/ggml/tree/master/examples/sam)
 - [SAM](https://segment-anything.com/)
 - [SAM demo](https://segment-anything.com/demo)
+
+## Next steps
+
+- [X] Reduce memory usage by utilizing the new ggml-alloc
+- [X] Remove redundant graph nodes
+- [ ] Make inference faster
+- [X] Fix the difference in output masks compared to the PyTorch implementation
+- [X] Filter masks based on stability score
+- [X] Add support for point user input
+- [ ] Support F16 for heavy F32 ops
+- [ ] Test quantization
+- [X] Support bigger model checkpoints
+- [ ] GPU support
+- [ ] Add support for mask and box input
