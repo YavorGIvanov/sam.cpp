@@ -90,7 +90,7 @@ Input image:
 
 Output mask (mask_out_2.png in build folder):
 
-![mask_glasses](https://user-images.githubusercontent.com/8558655/263706800-47eeea30-1457-4c87-938b-8f11536c5aa7.png)
+![mask_glasses](https://user-images.githubusercontent.com/8558655/265732931-e7e31285-7efc-4009-98c8-57fd819bdfc1.png)
 
 ## References
 
