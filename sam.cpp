@@ -10,6 +10,269 @@
 #include <cstring>
 #include <fstream>
 
+static const size_t tensor_alignment = 32;
+
+static void ggml_graph_compute_helper(std::vector<uint8_t> & buf, ggml_cgraph * graph, int n_threads) {
+    struct ggml_cplan plan = ggml_graph_plan(graph, n_threads);
+
+    if (plan.work_size > 0) {
+        buf.resize(plan.work_size);
+        plan.work_data = buf.data();
+    }
+
+    ggml_graph_compute(graph, &plan);
+}
+
+// RGB float32 image
+struct sam_image_f32 {
+    int nx = 0;
+    int ny = 0;
+
+    std::vector<float> data;
+};
+
+// default hparams (ViT-B SAM)
+struct sam_hparams {
+    int32_t n_enc_state               = 768;
+    int32_t n_enc_layer               = 12;
+    int32_t n_enc_head                = 12;
+    int32_t n_enc_out_chans           = 256;
+    int32_t n_pt_embd                 = 4;
+    int32_t n_dec_heads               = 8;
+    int32_t ftype                     = 1;
+    float   mask_threshold            = 0.f;
+    float   iou_threshold             = 0.85f; // Default in PyTorch is 0.88f
+    float   stability_score_threshold = 0.90f; // Default in PyTorch is 0.95f
+    float   stability_score_offset    = 1.0f;
+    float   eps                       = 1e-6f;
+    float   eps_decoder_transformer   = 1e-5f;
+
+    int32_t n_enc_head_dim() const { return n_enc_state / n_enc_head; }
+    int32_t n_img_size()     const { return 1024; }
+    int32_t n_window_size()  const { return 14; }
+    int32_t n_patch_size()   const { return 16; }
+    int32_t n_img_embd()     const { return n_img_size() / n_patch_size(); }
+
+    std::vector<int32_t> global_attn_indices() const {
+        switch (n_enc_state) {
+            case  768: return {  2,  5,  8, 11 };
+            case 1024: return {  5, 11, 17, 23 };
+            case 1280: return {  7, 15, 23, 31 };
+            default:
+                {
+                    printf("%s: unsupported n_enc_state = %d\n", __func__, n_enc_state);
+                } break;
+        };
+
+        return {};
+    }
+
+    bool is_global_attn(int32_t layer) const {
+        const auto indices = global_attn_indices();
+
+        for (const auto & idx : indices) {
+            if (layer == idx) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+};
+
+struct sam_layer_enc {
+    struct ggml_tensor * norm1_w;
+    struct ggml_tensor * norm1_b;
+
+    struct ggml_tensor * rel_pos_w;
+    struct ggml_tensor * rel_pos_h;
+
+    struct ggml_tensor * qkv_w;
+    struct ggml_tensor * qkv_b;
+
+    struct ggml_tensor * proj_w;
+    struct ggml_tensor * proj_b;
+
+    struct ggml_tensor * norm2_w;
+    struct ggml_tensor * norm2_b;
+
+    struct ggml_tensor * mlp_lin1_w;
+    struct ggml_tensor * mlp_lin1_b;
+
+    struct ggml_tensor * mlp_lin2_w;
+    struct ggml_tensor * mlp_lin2_b;
+};
+
+struct sam_encoder_image {
+    struct ggml_tensor * pe;
+
+    struct ggml_tensor * proj_w;
+    struct ggml_tensor * proj_b;
+
+    struct ggml_tensor * neck_conv_0;
+    struct ggml_tensor * neck_norm_0_w;
+    struct ggml_tensor * neck_norm_0_b;
+    struct ggml_tensor * neck_conv_1;
+    struct ggml_tensor * neck_norm_1_w;
+    struct ggml_tensor * neck_norm_1_b;
+
+    std::vector<sam_layer_enc> layers;
+};
+
+struct sam_encoder_prompt {
+    struct ggml_tensor * pe;
+
+    struct ggml_tensor * not_a_pt_embd_w;
+    std::vector<struct ggml_tensor *> pt_embd;
+
+    struct ggml_tensor * no_mask_embd_w;
+    //std::vector<struct ggml_tensor *> mask_down_w;
+    //std::vector<struct ggml_tensor *> mask_down_b;
+};
+
+struct  sam_layer_dec_transformer_attn {
+    // q_proj
+    struct ggml_tensor * q_w;
+    struct ggml_tensor * q_b;
+
+    // k_proj
+    struct ggml_tensor * k_w;
+    struct ggml_tensor * k_b;
+
+    // v_proj
+    struct ggml_tensor * v_w;
+    struct ggml_tensor * v_b;
+
+    // out_proj
+    struct ggml_tensor * out_w;
+    struct ggml_tensor * out_b;
+};
+
+struct sam_layer_dec_transformer {
+    sam_layer_dec_transformer_attn self_attn;
+
+    // norm1
+    struct ggml_tensor * norm1_w;
+    struct ggml_tensor * norm1_b;
+
+    sam_layer_dec_transformer_attn cross_attn_token_to_img;
+
+    // norm2
+    struct ggml_tensor * norm2_w;
+    struct ggml_tensor * norm2_b;
+
+    // mlp.lin1
+    struct ggml_tensor * mlp_lin1_w;
+    struct ggml_tensor * mlp_lin1_b;
+
+    // mlp.lin2
+    struct ggml_tensor * mlp_lin2_w;
+    struct ggml_tensor * mlp_lin2_b;
+
+    // norm3
+    struct ggml_tensor * norm3_w;
+    struct ggml_tensor * norm3_b;
+
+    // norm4
+    struct ggml_tensor * norm4_w;
+    struct ggml_tensor * norm4_b;
+
+    sam_layer_dec_transformer_attn cross_attn_img_to_token;
+};
+
+struct sam_layer_dec_output_hypernet_mlps {
+    // mlps_*.layers.0
+    struct ggml_tensor * w_0;
+    struct ggml_tensor * b_0;
+
+    // mlps_*.layers.1
+    struct ggml_tensor * w_1;
+    struct ggml_tensor * b_1;
+
+    // mlps_*.layers.2
+    struct ggml_tensor * w_2;
+    struct ggml_tensor * b_2;
+};
+
+struct sam_decoder_mask {
+    std::vector<sam_layer_dec_transformer> transformer_layers;
+
+    // trasnformer.final_attn_token_to_image
+    sam_layer_dec_transformer_attn transformer_final_attn_token_to_img;
+
+    // transformer.norm_final
+    struct ggml_tensor * transformer_norm_final_w;
+    struct ggml_tensor * transformer_norm_final_b;
+
+    // output_upscaling.0
+    struct ggml_tensor * output_upscaling_0_w;
+    struct ggml_tensor * output_upscaling_0_b;
+
+    // output_upscaling.1
+    struct ggml_tensor * output_upscaling_1_w;
+    struct ggml_tensor * output_upscaling_1_b;
+
+    // output_upscaling.3
+    struct ggml_tensor * output_upscaling_3_w;
+    struct ggml_tensor * output_upscaling_3_b;
+
+    // output_hypernetworks_mlps
+    std::vector<sam_layer_dec_output_hypernet_mlps> output_hypernet_mlps;
+
+    // iou_prediction_head.0
+    struct ggml_tensor * iou_prediction_head_0_w;
+    struct ggml_tensor * iou_prediction_head_0_b;
+
+    // iou_prediction_head.1
+    struct ggml_tensor * iou_prediction_head_1_w;
+    struct ggml_tensor * iou_prediction_head_1_b;
+
+    // iou_prediction_head.2
+    struct ggml_tensor * iou_prediction_head_2_w;
+    struct ggml_tensor * iou_prediction_head_2_b;
+
+    // iou_token.weight
+    struct ggml_tensor * iou_token_w;
+
+    // mask_tokens.weight
+    struct ggml_tensor * mask_tokens_w;
+};
+
+struct sam_ggml_model {
+    sam_hparams hparams;
+
+    sam_encoder_image  enc_img;
+    sam_encoder_prompt enc_prompt;
+    sam_decoder_mask   dec;
+
+    //
+    struct ggml_context * ctx;
+    std::map<std::string, struct ggml_tensor *> tensors;
+};
+
+struct sam_ggml_state {
+    struct ggml_tensor * embd_img = {};
+    struct ggml_context * ctx_img = {};
+
+    struct ggml_tensor * low_res_masks = {};
+    struct ggml_tensor * iou_predictions = {};
+    struct ggml_context * ctx_masks = {};
+
+    //struct ggml_tensor * tmp_save = {};
+
+
+    // buffer for `ggml_graph_plan.work_data`
+    std::vector<uint8_t> work_buffer;
+    // buffers to evaluate the model
+    std::vector<uint8_t> buf_alloc_img_enc;
+    std::vector<uint8_t> buf_compute_img_enc;
+
+    std::vector<uint8_t> buf_alloc_fast;
+    std::vector<uint8_t> buf_compute_fast;
+
+    struct ggml_allocr  * allocr = {};
+};
+
 // void save_tensor(sam_state& state, struct ggml_tensor * t, struct ggml_cgraph * gf) {
 //     if (!state.tmp_save) {
 //         state.tmp_save = ggml_new_tensor(state.ctx, t->type, t->n_dims, t->ne);
@@ -161,7 +424,7 @@ bool sam_image_preprocess(const sam_image_u8 & img, sam_image_f32 & res) {
     return true;
 }
 
-bool sam_model_load(const std::string & fname, sam_model & model) {
+bool sam_ggml_model_load(const std::string & fname, sam_ggml_model & model) {
     fprintf(stderr, "%s: loading model from '%s' - please wait ...\n", __func__, fname.c_str());
 
     auto fin = std::ifstream(fname, std::ios::binary);
@@ -775,47 +1038,11 @@ bool sam_model_load(const std::string & fname, sam_model & model) {
     return true;
 }
 
-void sam_state_init_img(
-        const sam_model & model,
-        sam_state       & state) {
-    static size_t buf_size = 256u*1024*1024;
-
-    struct ggml_init_params ggml_params = {
-        /*.mem_size   =*/ buf_size,
-        /*.mem_buffer =*/ NULL,
-        /*.no_alloc   =*/ false,
-    };
-
-    state.ctx_img = ggml_init(ggml_params);
-
-    state.embd_img = ggml_new_tensor_3d(state.ctx_img, GGML_TYPE_F32,
-            model.hparams.n_img_embd(), model.hparams.n_img_embd(), model.hparams.n_enc_out_chans);
-}
-
-void sam_state_init_masks(
-        const sam_model & model,
-        sam_state       & state) {
-    static size_t buf_size = 256u*1024*1024;
-
-    struct ggml_init_params ggml_params = {
-        /*.mem_size   =*/ buf_size,
-        /*.mem_buffer =*/ NULL,
-        /*.no_alloc   =*/ false,
-    };
-
-    state.ctx_masks = ggml_init(ggml_params);
-
-    state.low_res_masks = ggml_new_tensor_3d(state.ctx_masks, GGML_TYPE_F32,
-            model.hparams.n_enc_out_chans, model.hparams.n_enc_out_chans, 3);
-
-    state.iou_predictions = ggml_new_tensor_1d(state.ctx_masks, GGML_TYPE_F32, 3);
-}
-
 struct ggml_tensor * sam_fill_dense_pe(
-            const sam_model   & model,
-          struct ggml_context * ctx0,
-          struct ggml_cgraph  * gf,
-                  sam_state   & state) {
+            const sam_ggml_model & model,
+          struct ggml_context    * ctx0,
+          struct ggml_cgraph     * gf,
+                  sam_ggml_state & state) {
     const auto & hparams = model.hparams;
     const auto & enc     = model.enc_prompt;
 
@@ -884,8 +1111,8 @@ struct ggml_tensor* sam_layer_norm_2d(
 }
 
 struct ggml_cgraph  * sam_encode_image(
-            const sam_model & model,
-                  sam_state & state,
+            const sam_ggml_model & model,
+                  sam_ggml_state & state,
         const sam_image_f32 & img) {
 
     const auto & hparams = model.hparams;
@@ -1115,10 +1342,10 @@ struct prompt_encoder_result {
 // TODO: currently just encode a single point for simplicity
 //
 prompt_encoder_result sam_encode_prompt(
-        const sam_model     & model,
+        const sam_ggml_model     & model,
         struct ggml_context * ctx0,
         struct ggml_cgraph  * gf,
-                  sam_state & state,
+                  sam_ggml_state & state,
                         int   nx,
                         int   ny,
                   sam_point   point) {
@@ -1206,7 +1433,7 @@ struct ggml_tensor* sam_decode_mask_transformer_attn(
                       struct ggml_tensor * keys,
                       struct ggml_tensor * values,
                      struct ggml_context * ctx0,
-                         const sam_model & model) {
+                         const sam_ggml_model & model) {
     const auto & hparams = model.hparams;
     const int n_head = hparams.n_dec_heads;
 
@@ -1285,12 +1512,12 @@ struct ggml_tensor * sam_decode_mask_mlp_relu_3(
 }
 
 bool sam_decode_mask(
-                    const sam_model & model,
+                    const sam_ggml_model & model,
         const prompt_encoder_result & prompt,
                  struct ggml_tensor * pe_img,
                 struct ggml_context * ctx0,
                 struct ggml_cgraph  * gf,
-                          sam_state & state) {
+                          sam_ggml_state & state) {
 
     const auto & hparams = model.hparams;
     const auto & dec = model.dec;
@@ -1517,7 +1744,7 @@ bool sam_decode_mask(
     return true;
 }
 
-std::map<std::string, sam_image_u8> sam_postprocess_masks(const sam_hparams& hparams, int nx, int ny, const sam_state & state) {
+std::map<std::string, sam_image_u8> sam_postprocess_masks(const sam_hparams& hparams, int nx, int ny, const sam_ggml_state & state) {
     if (state.low_res_masks->ne[2] == 0) return {};
     if (state.low_res_masks->ne[2] != state.iou_predictions->ne[0]) {
         printf("Error: number of masks (%d) does not match number of iou predictions (%d)\n", (int)state.low_res_masks->ne[2], (int)state.iou_predictions->ne[0]);
@@ -1673,8 +1900,8 @@ std::map<std::string, sam_image_u8> sam_postprocess_masks(const sam_hparams& hpa
 }
 
 struct ggml_cgraph  * sam_build_fast_graph(
-        const sam_model     & model,
-                  sam_state & state,
+        const sam_ggml_model     & model,
+                  sam_ggml_state & state,
                         int   nx,
                         int   ny,
                   sam_point   point) {
@@ -1708,4 +1935,179 @@ struct ggml_cgraph  * sam_build_fast_graph(
     ggml_free(ctx0);
 
     return gf;
+}
+
+std::shared_ptr<sam_state> sam_load_model(const sam_params & params) {
+    const int64_t t_start_us = ggml_time_us();
+
+    sam_state state;
+    state.model = std::make_unique<sam_ggml_model>();
+    state.state = std::make_unique<sam_ggml_state>();
+    if (!sam_ggml_model_load(params.model, *state.model)) {
+        fprintf(stderr, "%s: failed to load model from '%s'\n", __func__, params.model.c_str());
+        return {};
+    }
+
+    state.t_load_us = ggml_time_us() - t_start_us;
+
+    return std::make_unique<sam_state>(std::move(state));
+}
+
+bool sam_compute_embd_img(const sam_image_u8 & img, int n_threads, sam_state & state) {
+    if (!state.model || !state.state) {
+        return false;
+    }
+
+    // preprocess to f32
+    sam_image_f32 img1;
+    if (!sam_image_preprocess(img, img1)) {
+        fprintf(stderr, "%s: failed to preprocess image\n", __func__);
+        return false;
+    }
+
+    fprintf(stderr, "%s: preprocessed image (%d x %d)\n", __func__, img1.nx, img1.ny);
+
+    static const size_t buf_size = 256u*1024*1024;
+
+    auto& st = *state.state;
+    auto& model = *state.model;
+
+    if (st.ctx_img) {
+        ggml_free(st.ctx_img);
+        st.ctx_img = {};
+    }
+
+    struct ggml_init_params ggml_params = {
+        /*.mem_size   =*/ buf_size,
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ false,
+    };
+
+    st.ctx_img = ggml_init(ggml_params);
+
+    st.embd_img = ggml_new_tensor_3d(st.ctx_img, GGML_TYPE_F32,
+            model.hparams.n_img_embd(), model.hparams.n_img_embd(), model.hparams.n_enc_out_chans);
+
+    // Encode the image
+    st.buf_compute_img_enc.resize(ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead());
+    st.allocr = ggml_allocr_new_measure(tensor_alignment);
+    struct ggml_cgraph * gf_measure = sam_encode_image(model, st, img1);
+    if (!gf_measure) {
+        fprintf(stderr, "%s: failed to encode image\n", __func__);
+        return false;
+    }
+
+    size_t alloc_size = ggml_allocr_alloc_graph(st.allocr, gf_measure) + tensor_alignment;
+    ggml_allocr_free(st.allocr);
+
+    // recreate allocator with exact memory requirements
+    st.buf_alloc_img_enc.resize(alloc_size);
+    st.allocr = ggml_allocr_new(st.buf_alloc_img_enc.data(), st.buf_alloc_img_enc.size(), tensor_alignment);
+
+    // compute the graph with the measured exact memory requirements from above
+    ggml_allocr_reset(st.allocr);
+
+    struct ggml_cgraph  * gf = sam_encode_image(model, st, img1);
+    if (!gf) {
+        fprintf(stderr, "%s: failed to encode image\n", __func__);
+        return false;
+    }
+
+    ggml_allocr_alloc_graph(st.allocr, gf);
+
+    ggml_graph_compute_helper(st.work_buffer, gf, n_threads);
+
+    ggml_allocr_free(st.allocr);
+    st.allocr = NULL;
+    st.work_buffer.clear();
+
+    return true;
+}
+
+std::map<std::string, sam_image_u8> sam_compute_masks(
+        const sam_image_u8 & img,
+        int                  n_threads,
+        sam_point            pt,
+        sam_state          & state) {
+    if (!state.model || !state.state) {
+        return {};
+    }
+
+    static size_t buf_size = 256u*1024*1024;
+
+    struct ggml_init_params ggml_params = {
+        /*.mem_size   =*/ buf_size,
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ false,
+    };
+
+    auto& st = *state.state;
+    auto& model = *state.model;
+
+    st.ctx_masks = ggml_init(ggml_params);
+
+    st.low_res_masks = ggml_new_tensor_3d(st.ctx_masks, GGML_TYPE_F32,
+            model.hparams.n_enc_out_chans, model.hparams.n_enc_out_chans, 3);
+
+    st.iou_predictions = ggml_new_tensor_1d(st.ctx_masks, GGML_TYPE_F32, 3);
+
+
+    st.buf_compute_fast.resize(ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead());
+    st.allocr = ggml_allocr_new_measure(tensor_alignment);
+
+    // measure memory requirements for the graph
+    struct ggml_cgraph  * gf_measure = sam_build_fast_graph(model, st, img.nx, img.ny, pt);
+    if (!gf_measure) {
+        fprintf(stderr, "%s: failed to build fast graph to measure\n", __func__);
+        return {};
+    }
+
+    size_t alloc_size = ggml_allocr_alloc_graph(st.allocr, gf_measure) + tensor_alignment;
+    ggml_allocr_free(st.allocr);
+
+    // recreate allocator with exact memory requirements
+    st.buf_alloc_fast.resize(alloc_size);
+    st.allocr = ggml_allocr_new(st.buf_alloc_fast.data(), st.buf_alloc_fast.size(), tensor_alignment);
+
+    // compute the graph with the measured exact memory requirements from above
+    ggml_allocr_reset(st.allocr);
+
+    struct ggml_cgraph  * gf = sam_build_fast_graph(model, st, img.nx, img.ny, pt);
+    if (!gf) {
+        fprintf(stderr, "%s: failed to build fast graph\n", __func__);
+        return {};
+    }
+
+    ggml_allocr_alloc_graph(st.allocr, gf);
+
+    ggml_graph_compute_helper(st.work_buffer, gf, n_threads);
+
+    //print_t_f32("iou_predictions", st.iou_predictions);
+    //print_t_f32("low_res_masks", st.low_res_masks);
+    ggml_allocr_free(st.allocr);
+    st.allocr = {};
+    st.buf_compute_fast.clear();
+    st.buf_alloc_fast.clear();
+
+    std::map<std::string, sam_image_u8> masks = sam_postprocess_masks(model.hparams, img.nx, img.ny, st);
+    if (masks.empty()) {
+        fprintf(stderr, "%s: failed to postprocess masks\n", __func__);
+    }
+
+    ggml_free(st.ctx_masks);
+    st.ctx_masks = {};
+    st.low_res_masks = {};
+    st.iou_predictions = {};
+
+    return masks;
+}
+
+void sam_deinit(sam_state & state) {
+    if (state.state) {
+        if (state.state->ctx_img) {
+            ggml_free(state.state->ctx_img);
+        }
+        state.model.reset();
+        state.state.reset();
+    }
 }
