@@ -24,6 +24,8 @@ target_link_libraries(imgui PRIVATE
     ${ADDITIONAL_LIBRARIES}
     )
 
+target_compile_features(imgui PUBLIC cxx_std_11)
+
 # target_compile_definitions(imgui PUBLIC
 #     IMGUI_USER_CONFIG="../imgui-extra/imconfig-vtx32.h"
 #     )
