@@ -34,7 +34,9 @@ struct sam_ggml_model;
 struct sam_state {
     std::unique_ptr<sam_ggml_state> state;
     std::unique_ptr<sam_ggml_model> model;
-    int64_t t_load_us = 0;
+    int t_load_ms = 0;
+    int t_compute_img_ms = 0;
+    int t_compute_masks_ms = 0;
 };
 
 std::shared_ptr<sam_state> sam_load_model(

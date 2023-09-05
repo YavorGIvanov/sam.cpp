@@ -1938,7 +1938,7 @@ struct ggml_cgraph  * sam_build_fast_graph(
 }
 
 std::shared_ptr<sam_state> sam_load_model(const sam_params & params) {
-    const int64_t t_start_us = ggml_time_us();
+    const int64_t t_start_ms = ggml_time_ms();
 
     sam_state state;
     state.model = std::make_unique<sam_ggml_model>();
@@ -1948,7 +1948,7 @@ std::shared_ptr<sam_state> sam_load_model(const sam_params & params) {
         return {};
     }
 
-    state.t_load_us = ggml_time_us() - t_start_us;
+    state.t_load_ms = ggml_time_ms() - t_start_ms;
 
     return std::make_unique<sam_state>(std::move(state));
 }
@@ -1957,6 +1957,8 @@ bool sam_compute_embd_img(const sam_image_u8 & img, int n_threads, sam_state & s
     if (!state.model || !state.state) {
         return false;
     }
+
+    const int64_t t_start_ms = ggml_time_ms();
 
     // preprocess to f32
     sam_image_f32 img1;
@@ -2021,6 +2023,8 @@ bool sam_compute_embd_img(const sam_image_u8 & img, int n_threads, sam_state & s
     st.allocr = NULL;
     st.work_buffer.clear();
 
+    state.t_compute_img_ms = ggml_time_ms() - t_start_ms;
+
     return true;
 }
 
@@ -2032,6 +2036,8 @@ std::map<std::string, sam_image_u8> sam_compute_masks(
     if (!state.model || !state.state) {
         return {};
     }
+
+    const int64_t t_start_ms = ggml_time_ms();
 
     static size_t buf_size = 256u*1024*1024;
 
@@ -2090,14 +2096,13 @@ std::map<std::string, sam_image_u8> sam_compute_masks(
     st.buf_alloc_fast.clear();
 
     std::map<std::string, sam_image_u8> masks = sam_postprocess_masks(model.hparams, img.nx, img.ny, st);
-    if (masks.empty()) {
-        fprintf(stderr, "%s: failed to postprocess masks\n", __func__);
-    }
 
     ggml_free(st.ctx_masks);
     st.ctx_masks = {};
     st.low_res_masks = {};
     st.iou_predictions = {};
+
+    state.t_compute_masks_ms = ggml_time_ms() - t_start_ms;
 
     return masks;
 }

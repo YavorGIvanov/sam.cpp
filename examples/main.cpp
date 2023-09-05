@@ -122,9 +122,9 @@ int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) 
 
     ImGui_PreInit();
 
-    const char * windowTitle = "SAM.cpp";
+    const char * title = "SAM.cpp";
     SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
-    SDL_Window * window = SDL_CreateWindow(windowTitle, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, img.nx, img.ny, window_flags);
+    SDL_Window * window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, img.nx, img.ny, window_flags);
     if (!window) {
         fprintf(stderr, "Error: %s\n", SDL_GetError());
         return -1;
@@ -170,11 +170,11 @@ int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) 
         }
 
         if (hasNewInputPoint) {
-            sam_point pt;
-            pt.x = x;
-            pt.y = y;
+            sam_point pt { x, y};
             printf("pt = (%f, %f)\n", pt.x, pt.y);
+
             masks = sam_compute_masks(img, params.n_threads, pt, state);
+
             if (!maskTextures.empty()) {
                 glDeleteTextures(maskTextures.size(), maskTextures.data());
                 maskTextures.clear();
@@ -188,7 +188,8 @@ int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) 
         ImGui::NewFrame();
         ImGui::SetNextWindowPos(ImVec2(0,0));
         ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
-        ImGui::Begin("SAM.cpp", NULL, ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::Begin(title, NULL, ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+
         ImDrawList* draw_list = ImGui::GetWindowDrawList();
         draw_list->AddImage((void*)(intptr_t)tex, ImVec2(0,0), ImVec2(img.nx, img.ny));
         int ii = 0;
@@ -199,7 +200,9 @@ int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) 
             draw_list->AddImage((void*)(intptr_t)maskTex, ImVec2(0,0), ImVec2(img.nx, img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(isRed ? 255 : 0, isGreen ? 255 : 0, isBlue ? 255 : 0, 128));
             ++ii;
         }
+
         draw_list->AddCircleFilled(ImVec2(x, y), 5, IM_COL32(255, 0, 0, 255));
+
         ImGui::End();
         ImGui::EndFrame();
         ImGui_EndFrame(window);
@@ -234,11 +237,13 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "%s: failed to load model\n", __func__);
         return 1;
     }
+    printf("t_load_ms = %d ms\n", state->t_load_ms);
 
     if (!sam_compute_embd_img(img0, params.n_threads, *state)) {
         fprintf(stderr, "%s: failed to compute encoded image\n", __func__);
         return 1;
     }
+    printf("t_compute_img_ms = %d ms\n", state->t_compute_img_ms);
 
     int res = main_loop(img0, params, *state);
 
