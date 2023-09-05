@@ -18,6 +18,10 @@ static bool load_image_from_file(const std::string & fname, sam_image_u8 & img) 
         fprintf(stderr, "%s: failed to load '%s'\n", __func__, fname.c_str());
         return false;
     }
+    if (nc != 3) {
+        fprintf(stderr, "%s: '%s' has %d channels (expected 3)\n", __func__, fname.c_str(), nc);
+        return false;
+    }
 
     img.nx = nx;
     img.ny = ny;
@@ -123,7 +127,7 @@ void disable_blending(const ImDrawList*, const ImDrawCmd*) {
     glDisable(GL_BLEND);
 }
 
-int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) {
+int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "Error: %s\n", SDL_GetError());
         return -1;
@@ -160,6 +164,7 @@ int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) 
     std::vector<GLuint> maskTextures;
     bool segmentOnHover = false;
     bool outputMultipleMasks = false;
+
     while (!done) {
         bool computeMasks = segmentOnHover;
         SDL_Event event;
@@ -181,6 +186,24 @@ int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) 
             if (segmentOnHover && event.type == SDL_MOUSEMOTION) {
                 x = event.motion.x;
                 y = event.motion.y;
+            }
+            if (event.type == SDL_DROPFILE) {
+                sam_image_u8 new_img;
+                if (!load_image_from_file(std::string(event.drop.file), new_img)) {
+                    printf("failed to load image from '%s'\n", event.drop.file);
+                }
+                else {
+                    SDL_SetWindowTitle(window, "Encoding new img...");
+                    if (!sam_compute_embd_img(new_img, params.n_threads, state)) {
+                        printf("failed to compute encoded image\n");
+                    }
+                    printf("t_compute_img_ms = %d ms\n", state.t_compute_img_ms);
+                    img = std::move(new_img);
+                    tex = createGLTexture(img, GL_RGB);
+                    SDL_SetWindowSize(window, img.nx, img.ny);
+                    SDL_SetWindowTitle(window, title);
+                    computeMasks = true;
+                }
             }
         }
 
@@ -208,8 +231,10 @@ int main_loop(sam_image_u8 & img, const sam_params & params, sam_state & state) 
         ImDrawList* draw_list = ImGui::GetWindowDrawList();
         draw_list->AddImage((void*)(intptr_t)tex, ImVec2(0,0), ImVec2(img.nx, img.ny));
 
+        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
         ImGui::Checkbox("Segment on hover", &segmentOnHover);
         ImGui::Checkbox("Output multiple masks", &outputMultipleMasks);
+        ImGui::PopStyleColor();
 
         draw_list->AddCircleFilled(ImVec2(x, y), 5, IM_COL32(255, 0, 0, 255));
 
@@ -266,13 +291,14 @@ int main(int argc, char ** argv) {
     }
     printf("t_load_ms = %d ms\n", state->t_load_ms);
 
+
     if (!sam_compute_embd_img(img0, params.n_threads, *state)) {
         fprintf(stderr, "%s: failed to compute encoded image\n", __func__);
         return 1;
     }
     printf("t_compute_img_ms = %d ms\n", state->t_compute_img_ms);
 
-    int res = main_loop(img0, params, *state);
+    int res = main_loop(std::move(img0), params, *state);
 
     sam_deinit(*state);
 
