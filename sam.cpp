@@ -1953,6 +1953,7 @@ struct ggml_cgraph  * sam_build_fast_graph(
 }
 
 std::shared_ptr<sam_state> sam_load_model(const sam_params & params) {
+    ggml_time_init();
     const int64_t t_start_ms = ggml_time_ms();
 
     sam_state state;
