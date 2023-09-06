@@ -105,7 +105,7 @@ static bool params_parse(int argc, char ** argv, sam_params & params) {
         } else if (arg == "-o" || arg == "--out") {
             params.fname_out = argv[++i];
         } else if (arg == "-f" || arg == "--factor") {
-            params.factor = std::stoi(argv[++i]);
+            params.factor = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argc, argv, params);
             exit(0);
