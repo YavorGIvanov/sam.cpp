@@ -22,6 +22,7 @@ struct sam_image_u8 {
 struct sam_params {
     int32_t seed      = -1; // RNG seed
     int32_t n_threads = std::min(4, (int32_t) std::thread::hardware_concurrency());
+    uint8_t factor = 1;
 
     std::string model     = "../checkpoints/ggml-model-f16-b.bin"; // model path
     std::string fname_inp = "../img.jpg";
