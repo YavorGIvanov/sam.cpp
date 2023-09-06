@@ -35,6 +35,7 @@ cmake .. && make -j4
 # run inference
 ./bin/sam -t 16 -i ../img.jpg -m ../checkpoints/ggml-model-f16.bin
 ```
+Note: The optimal threads parameter ("-t") value should be manually selected based on the specific machine running the inference.
 
 ## Downloading and converting the model checkpoints
 
