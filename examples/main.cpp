@@ -15,40 +15,94 @@
 #pragma warning(disable: 4244 4267) // possible loss of data
 #endif
 
+/**
+ * Get the size of screen where the SDL window runs in.
+ *
+ * SDL_Window* window could be NULL, which means we get the screen size of the default 0-index display.
+ * If window is not NULL, the we need to get the screen size of the display where the window runs in.
+ *
+ */
+static bool get_screen_size(SDL_DisplayMode &dm, SDL_Window* window) {
+  int displayIndex = 0;
+  if (window != NULL) {
+    displayIndex = SDL_GetWindowDisplayIndex(window);
+  }
+  if (displayIndex < 0) {
+    return false;
+  }
+  if (SDL_GetCurrentDisplayMode(displayIndex, &dm) != 0) {
+    return false;
+  }
+
+  fprintf(stderr, "%s: screen size (%d x %d) \n", __func__, dm.w, dm.h);
+  return true;
+}
+
 // resize image with nearest-neighbor interpolation
 static sam_image_u8 resize_image_data(sam_image_u8 &img , uint8_t scale) {
-  if (scale == 1) {
-    return img;
-  }
   sam_image_u8 new_img;
 
   int width = img.nx;
   int height = img.ny;
 
-  int new_width = img.nx / scale;
+  int new_width = img.ny / scale;
   int new_height = img.ny / scale;
 
   new_img.nx = new_width;
   new_img.ny = new_height;
   new_img.data.resize(new_img.nx*new_img.ny*3);
+
+  fprintf(stderr, "%s: scale: %d\n", __func__, scale);
   fprintf(stderr, "%s: resize image from (%d x %d) to (%d x %d)\n", __func__, img.nx, img.ny, new_img.nx, new_img.ny);
 
-  // the number of channels is always 3 from load_image_from_file
   for (int y = 0; y < new_height; ++y) {
-    for (int x = 0; x < new_width; ++x) {
-      int src_x = x * scale;
-      int src_y = y * scale;
+      for (int x = 0; x < new_width; ++x) {
+          int src_x = x * scale;
+          int src_y = y * scale;
 
-      int src_index = (src_y * width + src_x) * 3;
-      int dest_index = (y * new_width + x) * 3;
+          int src_index = (src_y * width + src_x) * 3;
+          int dest_index = (y * new_width + x) * 3;
 
-      for (int c = 0; c < 3; ++c) {
-        new_img.data[dest_index + c] = img.data[src_index+c];
+          for (int c = 0; c < 3; ++c) {
+              new_img.data[dest_index + c] = img.data[src_index + c];
+          }
       }
-    }
   }
 
+
   return new_img;
+}
+
+static int resize_img_if_exceed_screen(sam_image_u8 &img, SDL_Window* window) {
+    // get the screen size
+    SDL_DisplayMode dm = {};
+    if (!get_screen_size(dm, window)) {
+      fprintf(stderr, "%s: failed to get screen size of the display.\n", __func__);
+      return -1;
+    }
+
+    int screen_width = dm.w;
+    int screen_height= dm.h;
+
+    fprintf(stderr, "%s: img size (%d x %d) \n", __func__,img.nx,img.ny);
+    fprintf(stderr, "%s: screen size (%d x %d) \n", __func__,dm.w,dm.h);
+
+    if (screen_height == 0 || screen_width == 0) {
+      // This means the window is running in other display.
+      return -1;
+    }
+
+    if (img.ny > screen_height || img.nx > screen_width) {
+      fprintf(stderr, "%s: img size (%d x %d) exceeds screen size (%d x %d) \n", __func__,img.nx,img.ny,screen_width,screen_height);
+      // downscale
+      float scale_y = (float)img.ny/screen_height;
+      float scale_x = (float)img.nx/screen_width;
+      uint8_t scale = std::max(scale_x, scale_y);
+
+      img = resize_image_data(img, scale);
+    }
+
+    return 0;
 }
 
 static bool load_image_from_file(const std::string & fname, sam_image_u8 & img) {
@@ -80,7 +134,6 @@ static void print_usage(int argc, char ** argv, const sam_params & params) {
     fprintf(stderr, "  -h, --help            show this help message and exit\n");
     fprintf(stderr, "  -s SEED, --seed SEED  RNG seed (default: -1)\n");
     fprintf(stderr, "  -t N, --threads N     number of threads to use during computation (default: %d)\n", params.n_threads);
-    fprintf(stderr, "  -f N, --factor N      scale factor for the image (default: 1)\n");
     fprintf(stderr, "  -m FNAME, --model FNAME\n");
     fprintf(stderr, "                        model path (default: %s)\n", params.model.c_str());
     fprintf(stderr, "  -i FNAME, --inp FNAME\n");
@@ -104,8 +157,6 @@ static bool params_parse(int argc, char ** argv, sam_params & params) {
             params.fname_inp = argv[++i];
         } else if (arg == "-o" || arg == "--out") {
             params.fname_out = argv[++i];
-        } else if (arg == "-f" || arg == "--factor") {
-            params.factor = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "-h" || arg == "--help") {
             print_usage(argc, argv, params);
             exit(0);
@@ -173,18 +224,13 @@ void disable_blending(const ImDrawList*, const ImDrawCmd*) {
 }
 
 int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-        fprintf(stderr, "Error: %s\n", SDL_GetError());
-        return -1;
-    }
-
     ImGui_PreInit();
 
     const char * title = "SAM.cpp";
     SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
-    sam_image_u8 resized_img = resize_image_data(img, params.factor);
 
-    SDL_Window * window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, resized_img.nx, resized_img.ny, window_flags);
+    SDL_Window * window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, img.nx, img.ny, window_flags);
+
     if (!window) {
         fprintf(stderr, "Error: %s\n", SDL_GetError());
         return -1;
@@ -196,7 +242,6 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
     SDL_GL_SetSwapInterval(1); // Enable vsync
 
     GLuint tex = createGLTexture(img, GL_RGB);
-    GLuint resized_tex = createGLTexture(resized_img, GL_RGB);
 
     ImGui_Init(window, gl_context);
     ImGui::GetIO().IniFilename = nullptr;
@@ -207,15 +252,10 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
     ImGui_EndFrame(window);
 
     bool done = false;
-<<<<<<< HEAD
     float x = 0.f;
     float y = 0.f;
     float xLast = 0.f;
     float yLast = 0.f;
-=======
-    // x and y at original image
-    float x = 0.f, y = 0.f;
->>>>>>> 74f5c74 (feat: downscale image with -f, --factor)
     std::vector<sam_image_u8> masks;
     std::vector<GLuint> maskTextures;
     bool segmentOnMove = false;
@@ -236,19 +276,13 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
             if (event.type == SDL_MOUSEBUTTONDOWN) {
                 if (event.button.button == SDL_BUTTON_LEFT) {
                     computeMasks = true;
-                    x = event.button.x * params.factor;
-                    y = event.button.y * params.factor;
+                    x = event.button.x;
+                    y = event.button.y;
                 }
             }
-<<<<<<< HEAD
             if (segmentOnMove && event.type == SDL_MOUSEMOTION) {
                 x = event.motion.x;
                 y = event.motion.y;
-=======
-            if (segmentOnHover && event.type == SDL_MOUSEMOTION) {
-                x = event.motion.x * params.factor;
-                y = event.motion.y * params.factor;
->>>>>>> 74f5c74 (feat: downscale image with -f, --factor)
             }
             if (event.type == SDL_DROPFILE) {
                 sam_image_u8 new_img;
@@ -262,12 +296,12 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
                     }
                     printf("t_compute_img_ms = %d ms\n", state.t_compute_img_ms);
                     img = std::move(new_img);
-                    resized_img = resize_image_data(img, params.factor);
 
+                    // resize img when exceeds screen
+                    resize_img_if_exceed_screen(img, window);
                     tex = createGLTexture(img, GL_RGB);
-                    resized_tex = createGLTexture(resized_img, GL_RGB);
 
-                    SDL_SetWindowSize(window, resized_img.nx, resized_img.ny);
+                    SDL_SetWindowSize(window, img.nx, img.ny);
                     SDL_SetWindowTitle(window, title);
                     computeMasks = true;
                 }
@@ -312,14 +346,14 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
         ImGui::Begin(title, NULL, ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
 
         ImDrawList* draw_list = ImGui::GetWindowDrawList();
-        draw_list->AddImage((void*)(intptr_t)resized_tex, ImVec2(0,0), ImVec2(resized_img.nx, resized_img.ny));
+        draw_list->AddImage((void*)(intptr_t)tex, ImVec2(0,0), ImVec2(img.nx, img.ny));
 
         ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
         ImGui::Checkbox("Segment on hover", &segmentOnMove);
         ImGui::Checkbox("Output multiple masks", &outputMultipleMasks);
         ImGui::PopStyleColor();
 
-        draw_list->AddCircleFilled(ImVec2(x / params.factor, y / params.factor), 5, IM_COL32(255, 0, 0, 255));
+        draw_list->AddCircleFilled(ImVec2(x, y), 5, IM_COL32(255, 0, 0, 255));
 
         draw_list->AddCallback(enable_blending, {});
 
@@ -328,11 +362,11 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
                 const int r = i == 0 ? 255 : 0;
                 const int g = i == 1 ? 255 : 0;
                 const int b = i == 2 ? 255 : 0;
-                draw_list->AddImage((void*)(intptr_t)maskTextures[i], ImVec2(0,0), ImVec2(resized_img.nx, resized_img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(r, g, b, 172));
+                draw_list->AddImage((void*)(intptr_t)maskTextures[i], ImVec2(0,0), ImVec2(img.nx, img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(r, g, b, 172));
             }
         }
         else if (!maskTextures.empty()) {
-            draw_list->AddImage((void*)(intptr_t)maskTextures[0], ImVec2(0,0), ImVec2(resized_img.nx, resized_img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(0, 0, 255, 128));
+            draw_list->AddImage((void*)(intptr_t)maskTextures[0], ImVec2(0,0), ImVec2(img.nx,img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(0, 0, 255, 128));
         }
 
         draw_list->AddCallback(disable_blending, {});
@@ -366,6 +400,15 @@ int main(int argc, char ** argv) {
         return 1;
     }
     fprintf(stderr, "%s: loaded image '%s' (%d x %d)\n", __func__, params.fname_inp.c_str(), img0.nx, img0.ny);
+
+    // init SDL video subsystem to get the screen size
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        fprintf(stderr, "Error: %s\n", SDL_GetError());
+        return -1;
+    }
+
+    // resize img when exceeds the screen
+    resize_img_if_exceed_screen(img0, NULL);
 
     std::shared_ptr<sam_state> state = sam_load_model(params);
     if (!state) {
