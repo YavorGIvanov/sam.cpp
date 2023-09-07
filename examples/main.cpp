@@ -10,6 +10,7 @@
 #define SDL_DISABLE_ARM_NEON_H 1
 #include <SDL.h>
 #include <SDL_opengl.h>
+#include <cmath>
 
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
@@ -97,7 +98,7 @@ static int resize_img_if_exceed_screen(sam_image_u8 &img, SDL_Window* window) {
       // downscale
       float scale_y = (float)img.ny/screen_height;
       float scale_x = (float)img.nx/screen_width;
-      uint8_t scale = std::max(scale_x, scale_y);
+      uint8_t scale = std::ceil(std::max(scale_x, scale_y));
 
       img = resize_image_data(img, scale);
     }
