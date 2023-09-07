@@ -16,13 +16,26 @@ Note: you need to download the model checkpoint below (`sam_vit_b_01ec64.pth`) f
 # Convert PTH model to ggml. Requires python3, torch and numpy
 python convert-pth-to-ggml.py checkpoints/sam_vit_b_01ec64.pth . 1
 
-# Build sam.cpp. Might require cmake and SDL2 to be installed
+# You need CMake and SDL2
+SDL2 - Used for GUI windows & input [libsdl](https://www.libsdl.org)
+
+[Ubuntu]
+$ sudo apt install libsdl2-dev
+
+[Mac OS with brew]
+$ brew install sdl2
+
+[MSYS2]
+$ pacman -S git cmake make mingw-w64-x86_64-dlfcn mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2
+
+# Build sam.cpp.
 mkdir build && cd build
 cmake .. && make -j4
 
 # run inference
 ./bin/sam -t 16 -i ../img.jpg -m ../checkpoints/ggml-model-f16.bin
 ```
+Note: The optimal threads parameter ("-t") value should be manually selected based on the specific machine running the inference.
 
 ## Downloading and converting the model checkpoints
 

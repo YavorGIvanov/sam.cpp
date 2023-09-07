@@ -250,15 +250,20 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
     ImGui_EndFrame(window);
 
     bool done = false;
-    // x and y at original image
-    float x = 0.f, y = 0.f;
+
+    float x = 0.f;
+    float y = 0.f;
+    float xLast = 0.f;
+    float yLast = 0.f;
+
     std::vector<sam_image_u8> masks;
     std::vector<GLuint> maskTextures;
-    bool segmentOnHover = false;
+    bool segmentOnMove = false;
     bool outputMultipleMasks = false;
 
     while (!done) {
-        bool computeMasks = segmentOnHover;
+        bool computeMasks = false;
+
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             ImGui_ProcessEvent(&event);
@@ -275,7 +280,7 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
                     y = event.button.y;
                 }
             }
-            if (segmentOnHover && event.type == SDL_MOUSEMOTION) {
+            if (segmentOnMove && event.type == SDL_MOUSEMOTION) {
                 x = event.motion.x;
                 y = event.motion.y;
             }
@@ -302,6 +307,13 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
                 }
             }
         }
+
+        if (segmentOnMove && (x != xLast || y != yLast)) {
+            computeMasks = true;
+        }
+
+        xLast = x;
+        yLast = y;
 
         if (computeMasks) {
             sam_point pt { x, y};
@@ -337,7 +349,7 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
         draw_list->AddImage((void*)(intptr_t)tex, ImVec2(0,0), ImVec2(img.nx, img.ny));
 
         ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(0, 0, 0, 255));
-        ImGui::Checkbox("Segment on hover", &segmentOnHover);
+        ImGui::Checkbox("Segment on hover", &segmentOnMove);
         ImGui::Checkbox("Output multiple masks", &outputMultipleMasks);
         ImGui::PopStyleColor();
 
