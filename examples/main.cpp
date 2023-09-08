@@ -10,10 +10,100 @@
 #define SDL_DISABLE_ARM_NEON_H 1
 #include <SDL.h>
 #include <SDL_opengl.h>
+#include <cmath>
 
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
 #endif
+
+/**
+ * Get the size of screen where the SDL window runs in.
+ *
+ * SDL_Window* window could be NULL, which means we get the screen size of the default 0-index display.
+ * If window is not NULL, the we need to get the screen size of the display where the window runs in.
+ *
+ */
+static bool get_screen_size(SDL_DisplayMode &dm, SDL_Window* window) {
+    int displayIndex = 0;
+    if (window != NULL) {
+        displayIndex = SDL_GetWindowDisplayIndex(window);
+    }
+    if (displayIndex < 0) {
+        return false;
+    }
+    if (SDL_GetCurrentDisplayMode(displayIndex, &dm) != 0) {
+        return false;
+    }
+
+    fprintf(stderr, "%s: screen size (%d x %d) \n", __func__, dm.w, dm.h);
+    return true;
+}
+
+// downscale image with nearest-neighbor interpolation
+static sam_image_u8 downscale_img(sam_image_u8 &img , float scale) {
+    sam_image_u8 new_img;
+
+    int width = img.nx;
+    int height = img.ny;
+
+    int new_width = img.nx / scale + 0.5f;
+    int new_height = img.ny / scale + 0.5f;
+
+    new_img.nx = new_width;
+    new_img.ny = new_height;
+    new_img.data.resize(new_img.nx*new_img.ny*3);
+
+    fprintf(stderr, "%s: scale: %f\n", __func__, scale);
+    fprintf(stderr, "%s: resize image from (%d x %d) to (%d x %d)\n", __func__, img.nx, img.ny, new_img.nx, new_img.ny);
+
+    for (int y = 0; y < new_height; ++y) {
+        for (int x = 0; x < new_width; ++x) {
+            int src_x = (x + 0.5f) * scale - 0.5f;
+            int src_y = (y + 0.5f) * scale - 0.5f;
+
+            int src_index = (src_y * width + src_x) * 3;
+            int dest_index = (y * new_width + x) * 3;
+
+            for (int c = 0; c < 3; ++c) {
+                new_img.data[dest_index + c] = img.data[src_index + c];
+            }
+        }
+    }
+
+
+    return new_img;
+}
+
+static bool downscale_img_to_screen(sam_image_u8 &img, SDL_Window* window) {
+    SDL_DisplayMode dm = {};
+    if (!get_screen_size(dm, window)) {
+        fprintf(stderr, "%s: failed to get screen size of the display.\n", __func__);
+        return false;
+    }
+    fprintf(stderr, "%s: screen size (%d x %d) \n", __func__,dm.w,dm.h);
+    if (dm.h == 0 || dm.w == 0) {
+        // This means the window is running in other display.
+        return false;
+    }
+
+    // Add 5% margin between screen and window
+    const float margin = 0.05f;
+    const int max_width  = dm.w - margin * dm.w;
+    const int max_height = dm.h - margin * dm.h;
+
+    fprintf(stderr, "%s: img size (%d x %d) \n", __func__,img.nx,img.ny);
+
+    if (img.ny > max_height || img.nx > max_width) {
+        fprintf(stderr, "%s: img size (%d x %d) exceeds maximum allowed size (%d x %d) \n", __func__,img.nx,img.ny,max_width,max_height);
+        const float scale_y = (float)img.ny / max_height;
+        const float scale_x = (float)img.nx / max_width;
+        const float scale = std::max(scale_x, scale_y);
+
+        img = downscale_img(img, scale);
+    }
+
+    return true;
+}
 
 static bool load_image_from_file(const std::string & fname, sam_image_u8 & img) {
     int nx, ny, nc;
@@ -134,16 +224,13 @@ void disable_blending(const ImDrawList*, const ImDrawCmd*) {
 }
 
 int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-        fprintf(stderr, "Error: %s\n", SDL_GetError());
-        return -1;
-    }
-
     ImGui_PreInit();
 
     const char * title = "SAM.cpp";
     SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
+
     SDL_Window * window = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, img.nx, img.ny, window_flags);
+
     if (!window) {
         fprintf(stderr, "Error: %s\n", SDL_GetError());
         return -1;
@@ -204,14 +291,17 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
                 }
                 else {
                     SDL_SetWindowTitle(window, "Encoding new img...");
+                    downscale_img_to_screen(new_img, window);
                     if (!sam_compute_embd_img(new_img, params.n_threads, state)) {
                         printf("failed to compute encoded image\n");
                     }
                     printf("t_compute_img_ms = %d ms\n", state.t_compute_img_ms);
-                    img = std::move(new_img);
-                    tex = createGLTexture(img, GL_RGB);
-                    SDL_SetWindowSize(window, img.nx, img.ny);
+
+                    tex = createGLTexture(new_img, GL_RGB);
+
+                    SDL_SetWindowSize(window, new_img.nx, new_img.ny);
                     SDL_SetWindowTitle(window, title);
+                    img = std::move(new_img);
                     computeMasks = true;
                 }
             }
@@ -234,6 +324,7 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
                 glDeleteTextures(maskTextures.size(), maskTextures.data());
                 maskTextures.clear();
             }
+
             for (auto& mask : masks) {
                 sam_image_u8 mask_rgb = { mask.nx, mask.ny, };
                 mask_rgb.data.resize(3*mask.nx*mask.ny);
@@ -274,7 +365,7 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
             }
         }
         else if (!maskTextures.empty()) {
-            draw_list->AddImage((void*)(intptr_t)maskTextures[0], ImVec2(0,0), ImVec2(img.nx, img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(0, 0, 255, 128));
+            draw_list->AddImage((void*)(intptr_t)maskTextures[0], ImVec2(0,0), ImVec2(img.nx,img.ny), ImVec2(0,0), ImVec2(1,1), IM_COL32(0, 0, 255, 128));
         }
 
         draw_list->AddCallback(disable_blending, {});
@@ -308,6 +399,15 @@ int main(int argc, char ** argv) {
         return 1;
     }
     fprintf(stderr, "%s: loaded image '%s' (%d x %d)\n", __func__, params.fname_inp.c_str(), img0.nx, img0.ny);
+
+    // init SDL video subsystem to get the screen size
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        fprintf(stderr, "Error: %s\n", SDL_GetError());
+        return -1;
+    }
+
+    // resize img when exceeds the screen
+    downscale_img_to_screen(img0, NULL);
 
     std::shared_ptr<sam_state> state = sam_load_model(params);
     if (!state) {
