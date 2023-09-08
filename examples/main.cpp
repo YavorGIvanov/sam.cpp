@@ -24,86 +24,85 @@
  *
  */
 static bool get_screen_size(SDL_DisplayMode &dm, SDL_Window* window) {
-  int displayIndex = 0;
-  if (window != NULL) {
-    displayIndex = SDL_GetWindowDisplayIndex(window);
-  }
-  if (displayIndex < 0) {
-    return false;
-  }
-  if (SDL_GetCurrentDisplayMode(displayIndex, &dm) != 0) {
-    return false;
-  }
+    int displayIndex = 0;
+    if (window != NULL) {
+        displayIndex = SDL_GetWindowDisplayIndex(window);
+    }
+    if (displayIndex < 0) {
+        return false;
+    }
+    if (SDL_GetCurrentDisplayMode(displayIndex, &dm) != 0) {
+        return false;
+    }
 
-  fprintf(stderr, "%s: screen size (%d x %d) \n", __func__, dm.w, dm.h);
-  return true;
+    fprintf(stderr, "%s: screen size (%d x %d) \n", __func__, dm.w, dm.h);
+    return true;
 }
 
-// resize image with nearest-neighbor interpolation
-static sam_image_u8 resize_image_data(sam_image_u8 &img , uint8_t scale) {
-  sam_image_u8 new_img;
+// downscale image with nearest-neighbor interpolation
+static sam_image_u8 downscale_img(sam_image_u8 &img , float scale) {
+    sam_image_u8 new_img;
 
-  int width = img.nx;
-  int height = img.ny;
+    int width = img.nx;
+    int height = img.ny;
 
-  int new_width = img.ny / scale;
-  int new_height = img.ny / scale;
+    int new_width = img.nx / scale + 0.5f;
+    int new_height = img.ny / scale + 0.5f;
 
-  new_img.nx = new_width;
-  new_img.ny = new_height;
-  new_img.data.resize(new_img.nx*new_img.ny*3);
+    new_img.nx = new_width;
+    new_img.ny = new_height;
+    new_img.data.resize(new_img.nx*new_img.ny*3);
 
-  fprintf(stderr, "%s: scale: %d\n", __func__, scale);
-  fprintf(stderr, "%s: resize image from (%d x %d) to (%d x %d)\n", __func__, img.nx, img.ny, new_img.nx, new_img.ny);
+    fprintf(stderr, "%s: scale: %f\n", __func__, scale);
+    fprintf(stderr, "%s: resize image from (%d x %d) to (%d x %d)\n", __func__, img.nx, img.ny, new_img.nx, new_img.ny);
 
-  for (int y = 0; y < new_height; ++y) {
-      for (int x = 0; x < new_width; ++x) {
-          int src_x = x * scale;
-          int src_y = y * scale;
+    for (int y = 0; y < new_height; ++y) {
+        for (int x = 0; x < new_width; ++x) {
+            int src_x = (x + 0.5f) * scale - 0.5f;
+            int src_y = (y + 0.5f) * scale - 0.5f;
 
-          int src_index = (src_y * width + src_x) * 3;
-          int dest_index = (y * new_width + x) * 3;
+            int src_index = (src_y * width + src_x) * 3;
+            int dest_index = (y * new_width + x) * 3;
 
-          for (int c = 0; c < 3; ++c) {
-              new_img.data[dest_index + c] = img.data[src_index + c];
-          }
-      }
-  }
+            for (int c = 0; c < 3; ++c) {
+                new_img.data[dest_index + c] = img.data[src_index + c];
+            }
+        }
+    }
 
 
-  return new_img;
+    return new_img;
 }
 
-static int resize_img_if_exceed_screen(sam_image_u8 &img, SDL_Window* window) {
-    // get the screen size
+static bool downscale_img_to_screen(sam_image_u8 &img, SDL_Window* window) {
     SDL_DisplayMode dm = {};
     if (!get_screen_size(dm, window)) {
-      fprintf(stderr, "%s: failed to get screen size of the display.\n", __func__);
-      return -1;
+        fprintf(stderr, "%s: failed to get screen size of the display.\n", __func__);
+        return false;
+    }
+    fprintf(stderr, "%s: screen size (%d x %d) \n", __func__,dm.w,dm.h);
+    if (dm.h == 0 || dm.w == 0) {
+        // This means the window is running in other display.
+        return false;
     }
 
-    int screen_width = dm.w;
-    int screen_height= dm.h;
+    // Add 5% margin between screen and window
+    const float margin = 0.05f;
+    const int max_width  = dm.w - margin * dm.w;
+    const int max_height = dm.h - margin * dm.h;
 
     fprintf(stderr, "%s: img size (%d x %d) \n", __func__,img.nx,img.ny);
-    fprintf(stderr, "%s: screen size (%d x %d) \n", __func__,dm.w,dm.h);
 
-    if (screen_height == 0 || screen_width == 0) {
-      // This means the window is running in other display.
-      return -1;
+    if (img.ny > max_height || img.nx > max_width) {
+        fprintf(stderr, "%s: img size (%d x %d) exceeds maximum allowed size (%d x %d) \n", __func__,img.nx,img.ny,max_width,max_height);
+        const float scale_y = (float)img.ny / max_height;
+        const float scale_x = (float)img.nx / max_width;
+        const float scale = std::max(scale_x, scale_y);
+
+        img = downscale_img(img, scale);
     }
 
-    if (img.ny > screen_height || img.nx > screen_width) {
-      fprintf(stderr, "%s: img size (%d x %d) exceeds screen size (%d x %d) \n", __func__,img.nx,img.ny,screen_width,screen_height);
-      // downscale
-      float scale_y = (float)img.ny/screen_height;
-      float scale_x = (float)img.nx/screen_width;
-      uint8_t scale = std::ceil(std::max(scale_x, scale_y));
-
-      img = resize_image_data(img, scale);
-    }
-
-    return 0;
+    return true;
 }
 
 static bool load_image_from_file(const std::string & fname, sam_image_u8 & img) {
@@ -292,18 +291,17 @@ int main_loop(sam_image_u8 img, const sam_params & params, sam_state & state) {
                 }
                 else {
                     SDL_SetWindowTitle(window, "Encoding new img...");
+                    downscale_img_to_screen(new_img, window);
                     if (!sam_compute_embd_img(new_img, params.n_threads, state)) {
                         printf("failed to compute encoded image\n");
                     }
                     printf("t_compute_img_ms = %d ms\n", state.t_compute_img_ms);
-                    img = std::move(new_img);
 
-                    // resize img when exceeds screen
-                    resize_img_if_exceed_screen(img, window);
-                    tex = createGLTexture(img, GL_RGB);
+                    tex = createGLTexture(new_img, GL_RGB);
 
-                    SDL_SetWindowSize(window, img.nx, img.ny);
+                    SDL_SetWindowSize(window, new_img.nx, new_img.ny);
                     SDL_SetWindowTitle(window, title);
+                    img = std::move(new_img);
                     computeMasks = true;
                 }
             }
@@ -409,7 +407,7 @@ int main(int argc, char ** argv) {
     }
 
     // resize img when exceeds the screen
-    resize_img_if_exceed_screen(img0, NULL);
+    downscale_img_to_screen(img0, NULL);
 
     std::shared_ptr<sam_state> state = sam_load_model(params);
     if (!state) {
