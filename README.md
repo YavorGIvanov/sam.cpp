@@ -37,6 +37,8 @@ cmake .. && make -j4
 ```
 Note: The optimal threads parameter ("-t") value should be manually selected based on the specific machine running the inference.
 
+Note: If you have problems with the Windows build, you can check [this issue](https://github.com/YavorGIvanov/sam.cpp/issues/8) for more details
+
 ## Downloading and converting the model checkpoints
 
 You can download a [model checkpoint](https://github.com/facebookresearch/segment-anything/tree/main#model-checkpoints) and convert it to `ggml` format using the script `convert-pth-to-ggml.py`:
