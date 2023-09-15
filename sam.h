@@ -15,6 +15,7 @@ struct sam_point {
 struct sam_image_u8 {
     int nx = 0;
     int ny = 0;
+    int nc = 0;
 
     std::vector<uint8_t> data;
 };

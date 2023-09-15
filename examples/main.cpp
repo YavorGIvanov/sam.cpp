@@ -128,6 +128,7 @@ static bool load_image_from_file(const std::string & fname, sam_image_u8 & img) 
     
     img.nx = nx;
     img.ny = ny;
+    img.nc = nc;
     img.data.resize(nx * ny * nc); // // can be 3 or 4, therefore using nc
     memcpy(img.data.data(), data, nx * ny * nc); // can be 3 or 4, therefore using nc
 
