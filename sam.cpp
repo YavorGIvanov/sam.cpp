@@ -3,6 +3,7 @@
 
 #include "ggml.h"
 #include "ggml-alloc.h"
+#include "ggml-backend.h"
 
 #include <cassert>
 #include <cmath>
@@ -15,17 +16,9 @@
 #pragma warning(disable: 4244 4267) // possible loss of data
 #endif
 
-static const size_t tensor_alignment = 32;
-
-static void ggml_graph_compute_helper(std::vector<uint8_t> & buf, ggml_cgraph * graph, int n_threads) {
-    struct ggml_cplan plan = ggml_graph_plan(graph, n_threads);
-
-    if (plan.work_size > 0) {
-        buf.resize(plan.work_size);
-        plan.work_data = buf.data();
-    }
-
-    ggml_graph_compute(graph, &plan);
+static void ggml_graph_compute_helper(ggml_backend_t backend, ggml_cgraph * graph, int n_threads) {
+    ggml_backend_cpu_set_n_threads(backend, n_threads);
+    ggml_backend_graph_compute(backend, graph);
 }
 
 // RGB float32 image
@@ -250,6 +243,10 @@ struct sam_ggml_model {
     sam_encoder_prompt enc_prompt;
     sam_decoder_mask   dec;
 
+    ggml_backend_t backend = {};
+    ggml_backend_buffer_t buffer = {};
+
+
     //
     struct ggml_context * ctx;
     std::map<std::string, struct ggml_tensor *> tensors;
@@ -264,16 +261,6 @@ struct sam_ggml_state {
     struct ggml_context * ctx_masks = {};
 
     //struct ggml_tensor * tmp_save = {};
-
-
-    // buffer for `ggml_graph_plan.work_data`
-    std::vector<uint8_t> work_buffer;
-    // buffers to evaluate the model
-    std::vector<uint8_t> buf_alloc_img_enc;
-    std::vector<uint8_t> buf_compute_img_enc;
-
-    std::vector<uint8_t> buf_alloc_fast;
-    std::vector<uint8_t> buf_compute_fast;
 
     struct ggml_allocr  * allocr = {};
 };
@@ -483,8 +470,8 @@ bool sam_ggml_model_load(const std::string & fname, sam_ggml_model & model) {
 
     auto & ctx = model.ctx;
 
-    const size_t ctx_size = [&]() {
-        size_t ctx_size = 0;
+    const size_t buf_size = [&]() {
+        size_t buf_size = 0;
 
         const auto & hparams = model.hparams;
 
@@ -503,59 +490,59 @@ bool sam_ggml_model_load(const std::string & fname, sam_ggml_model & model) {
 
         // image encoder
         {
-            ctx_size += n_enc_state*n_img_embd*n_img_embd*ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_state*n_img_embd*n_img_embd*ggml_type_sizef(GGML_TYPE_F32);
 
-            ctx_size += n_enc_state*3*n_patch_size*n_patch_size*ggml_type_sizef(GGML_TYPE_F16);
-            ctx_size += n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_state*3*n_patch_size*n_patch_size*ggml_type_sizef(GGML_TYPE_F16);
+            buf_size += n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
 
-            ctx_size +=     n_enc_state*n_enc_out_chans*1*1*ggml_type_sizef(GGML_TYPE_F16);
-            ctx_size += n_enc_out_chans*n_enc_out_chans*3*3*ggml_type_sizef(GGML_TYPE_F16);
+            buf_size +=     n_enc_state*n_enc_out_chans*1*1*ggml_type_sizef(GGML_TYPE_F16);
+            buf_size += n_enc_out_chans*n_enc_out_chans*3*3*ggml_type_sizef(GGML_TYPE_F16);
 
-            ctx_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
-            ctx_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
 
-            ctx_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
-            ctx_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
         }
 
         // image encoder layers
         {
-            ctx_size += n_enc_layer*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
-            ctx_size += n_enc_layer*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_layer*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_layer*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
 
-            ctx_size += n_enc_layer_global*n_enc_head_dim*(2*n_img_embd - 1)*ggml_type_sizef(GGML_TYPE_F16);
-            ctx_size += n_enc_layer_global*n_enc_head_dim*(2*n_img_embd - 1)*ggml_type_sizef(GGML_TYPE_F16);
+            buf_size += n_enc_layer_global*n_enc_head_dim*(2*n_img_embd - 1)*ggml_type_sizef(GGML_TYPE_F16);
+            buf_size += n_enc_layer_global*n_enc_head_dim*(2*n_img_embd - 1)*ggml_type_sizef(GGML_TYPE_F16);
 
-            ctx_size += n_enc_layer_local*n_enc_head_dim*(2*n_window_size - 1)*ggml_type_sizef(GGML_TYPE_F16);
-            ctx_size += n_enc_layer_local*n_enc_head_dim*(2*n_window_size - 1)*ggml_type_sizef(GGML_TYPE_F16);
+            buf_size += n_enc_layer_local*n_enc_head_dim*(2*n_window_size - 1)*ggml_type_sizef(GGML_TYPE_F16);
+            buf_size += n_enc_layer_local*n_enc_head_dim*(2*n_window_size - 1)*ggml_type_sizef(GGML_TYPE_F16);
 
-            ctx_size += n_enc_layer*3*n_enc_state*n_enc_state*ggml_type_sizef(GGML_TYPE_F16);
-            ctx_size += n_enc_layer*3*n_enc_state*            ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_layer*3*n_enc_state*n_enc_state*ggml_type_sizef(GGML_TYPE_F16);
+            buf_size += n_enc_layer*3*n_enc_state*            ggml_type_sizef(GGML_TYPE_F32);
 
-            ctx_size += n_enc_layer*n_enc_state*n_enc_state*ggml_type_sizef(GGML_TYPE_F16);
-            ctx_size += n_enc_layer*n_enc_state*            ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_layer*n_enc_state*n_enc_state*ggml_type_sizef(GGML_TYPE_F16);
+            buf_size += n_enc_layer*n_enc_state*            ggml_type_sizef(GGML_TYPE_F32);
 
-            ctx_size += n_enc_layer*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
-            ctx_size += n_enc_layer*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_layer*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_layer*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
 
-            ctx_size += n_enc_layer*4*n_enc_state*n_enc_state*ggml_type_sizef(GGML_TYPE_F16);
-            ctx_size += n_enc_layer*4*n_enc_state*            ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_layer*4*n_enc_state*n_enc_state*ggml_type_sizef(GGML_TYPE_F16);
+            buf_size += n_enc_layer*4*n_enc_state*            ggml_type_sizef(GGML_TYPE_F32);
 
-            ctx_size += n_enc_layer*4*n_enc_state*n_enc_state*ggml_type_sizef(GGML_TYPE_F16);
-            ctx_size += n_enc_layer*4*n_enc_state*            ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_layer*4*n_enc_state*n_enc_state*ggml_type_sizef(GGML_TYPE_F16);
+            buf_size += n_enc_layer*4*n_enc_state*            ggml_type_sizef(GGML_TYPE_F32);
         }
 
-        ctx_size += (8 + 14*n_enc_layer)*ggml_tensor_overhead();
+        buf_size += (8 + 14*n_enc_layer)*ggml_tensor_overhead();
 
         // prompt encoder
         {
-            ctx_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F16); // 2*(n_enc_out_chans/2)
+            buf_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F16); // 2*(n_enc_out_chans/2)
 
-            ctx_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
-            ctx_size += n_pt_embd*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
+            buf_size += n_pt_embd*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
         }
 
-        ctx_size += (2 + n_pt_embd)*ggml_tensor_overhead();
+        buf_size += (2 + n_pt_embd)*ggml_tensor_overhead();
 
         // mask decoder
         {
@@ -567,75 +554,75 @@ bool sam_ggml_model_load(const std::string & fname, sam_ggml_model & model) {
                 const int n_hypernet_mpls_count = 4;
 
                 // self_attn
-                ctx_size += tfm_layers_count*qkv_count*n_enc_state*n_enc_state*ggml_type_sizef(GGML_TYPE_F16);
-                ctx_size += tfm_layers_count*qkv_count*n_enc_state*            ggml_type_sizef(GGML_TYPE_F32);
-                ctx_size += tfm_layers_count*n_enc_state*                      ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += tfm_layers_count*qkv_count*n_enc_state*n_enc_state*ggml_type_sizef(GGML_TYPE_F16);
+                buf_size += tfm_layers_count*qkv_count*n_enc_state*            ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += tfm_layers_count*n_enc_state*                      ggml_type_sizef(GGML_TYPE_F32);
 
                 // all norms
-                ctx_size += tfm_layers_count*norm_count*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
-                ctx_size += tfm_layers_count*norm_count*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += tfm_layers_count*norm_count*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += tfm_layers_count*norm_count*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
 
                 // cross_attn_token_to_img
-                ctx_size += tfm_layers_count*qkv_count*n_enc_state*(n_enc_state/2)*ggml_type_sizef(GGML_TYPE_F16);
-                ctx_size += tfm_layers_count*qkv_count*(n_enc_state/2)*            ggml_type_sizef(GGML_TYPE_F32);
-                ctx_size += tfm_layers_count*n_enc_state*                          ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += tfm_layers_count*qkv_count*n_enc_state*(n_enc_state/2)*ggml_type_sizef(GGML_TYPE_F16);
+                buf_size += tfm_layers_count*qkv_count*(n_enc_state/2)*            ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += tfm_layers_count*n_enc_state*                          ggml_type_sizef(GGML_TYPE_F32);
 
                 // mlp
-                ctx_size += tfm_layers_count*8*n_enc_out_chans*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F16);
-                ctx_size += tfm_layers_count*8*n_enc_out_chans*                ggml_type_sizef(GGML_TYPE_F32);
-                ctx_size += tfm_layers_count*n_enc_out_chans*8*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F16);
-                ctx_size += tfm_layers_count*n_enc_out_chans*                  ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += tfm_layers_count*8*n_enc_out_chans*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F16);
+                buf_size += tfm_layers_count*8*n_enc_out_chans*                ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += tfm_layers_count*n_enc_out_chans*8*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F16);
+                buf_size += tfm_layers_count*n_enc_out_chans*                  ggml_type_sizef(GGML_TYPE_F32);
 
                 // cross_attn_img_to_token
-                ctx_size += tfm_layers_count*qkv_count*n_enc_state*(n_enc_state/2)*ggml_type_sizef(GGML_TYPE_F16);
-                ctx_size += tfm_layers_count*qkv_count*(n_enc_state/2)*            ggml_type_sizef(GGML_TYPE_F32);
-                ctx_size += tfm_layers_count*n_enc_state*                          ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += tfm_layers_count*qkv_count*n_enc_state*(n_enc_state/2)*ggml_type_sizef(GGML_TYPE_F16);
+                buf_size += tfm_layers_count*qkv_count*(n_enc_state/2)*            ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += tfm_layers_count*n_enc_state*                          ggml_type_sizef(GGML_TYPE_F32);
 
                 // transformer_final_attn_token_to_img
-                ctx_size += qkv_count*n_enc_state*(n_enc_state/2)*ggml_type_sizef(GGML_TYPE_F16);
-                ctx_size += qkv_count*(n_enc_state/2)*            ggml_type_sizef(GGML_TYPE_F32);
-                ctx_size += n_enc_state*                          ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += qkv_count*n_enc_state*(n_enc_state/2)*ggml_type_sizef(GGML_TYPE_F16);
+                buf_size += qkv_count*(n_enc_state/2)*            ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += n_enc_state*                          ggml_type_sizef(GGML_TYPE_F32);
 
                 // transformer_norm_final
-                ctx_size += norm_count*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
-                ctx_size += norm_count*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += norm_count*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += norm_count*n_enc_state*ggml_type_sizef(GGML_TYPE_F32);
 
                 // output_upscaling
-                ctx_size += n_enc_out_chans*n_img_embd*2*2*ggml_type_sizef(GGML_TYPE_F16);
-                ctx_size += 3*n_img_embd*                  ggml_type_sizef(GGML_TYPE_F32);
-                ctx_size += n_enc_out_chans*n_img_embd*(n_img_embd/2)*2*2*ggml_type_sizef(GGML_TYPE_F16);
-                ctx_size += (n_img_embd/2)*                               ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += n_enc_out_chans*n_img_embd*2*2*ggml_type_sizef(GGML_TYPE_F16);
+                buf_size += 3*n_img_embd*                  ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += n_enc_out_chans*n_img_embd*(n_img_embd/2)*2*2*ggml_type_sizef(GGML_TYPE_F16);
+                buf_size += (n_img_embd/2)*                               ggml_type_sizef(GGML_TYPE_F32);
 
                 // output_hypernetworks_mlps
-                ctx_size += n_hypernet_mpls_count*2*n_enc_out_chans*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F16);
-                ctx_size += n_hypernet_mpls_count*2*n_enc_out_chans*                ggml_type_sizef(GGML_TYPE_F32);
-                ctx_size += n_hypernet_mpls_count*n_enc_out_chans*(n_img_embd/2)*ggml_type_sizef(GGML_TYPE_F16);
-                ctx_size += n_hypernet_mpls_count*(n_img_embd/2)*                ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += n_hypernet_mpls_count*2*n_enc_out_chans*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F16);
+                buf_size += n_hypernet_mpls_count*2*n_enc_out_chans*                ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += n_hypernet_mpls_count*n_enc_out_chans*(n_img_embd/2)*ggml_type_sizef(GGML_TYPE_F16);
+                buf_size += n_hypernet_mpls_count*(n_img_embd/2)*                ggml_type_sizef(GGML_TYPE_F32);
 
                 // iou_prediction_head
-                ctx_size += 2*n_enc_out_chans*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F16);
-                ctx_size += 2*n_enc_out_chans*                ggml_type_sizef(GGML_TYPE_F32);
-                ctx_size += n_pt_embd*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F16);
-                ctx_size += n_pt_embd*                ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += 2*n_enc_out_chans*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F16);
+                buf_size += 2*n_enc_out_chans*                ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += n_pt_embd*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F16);
+                buf_size += n_pt_embd*                ggml_type_sizef(GGML_TYPE_F32);
 
                 // iou_token_w
-                ctx_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
 
                 // mask_tokens_w
-                ctx_size += n_pt_embd*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
+                buf_size += n_pt_embd*n_enc_out_chans*ggml_type_sizef(GGML_TYPE_F32);
             }
         }
-        fprintf(stderr, "%s: ggml ctx size = %6.2f MB\n", __func__, ctx_size/(1024.0*1024.0));
+        fprintf(stderr, "ggml buffer size = %6.2f MB\n", buf_size/(1024.0*1024.0));
 
-        return ctx_size;
+        return buf_size;
     }();
 
     // create the ggml context
     {
         struct ggml_init_params params = {
-            /*.mem_size   =*/ ctx_size,
+            /*.mem_size   =*/ ggml_tensor_overhead() * GGML_MAX_NODES,
             /*.mem_buffer =*/ NULL,
-            /*.no_alloc   =*/ false,
+            /*.no_alloc   =*/ true,
         };
 
         ctx = ggml_init(params);
@@ -643,6 +630,20 @@ bool sam_ggml_model_load(const std::string & fname, sam_ggml_model & model) {
             fprintf(stderr, "%s: ggml_init() failed\n", __func__);
             return false;
         }
+    }
+
+    // initialize backend & allocate buffers
+    {
+        if (!model.backend) {
+            printf("Using CPU backend\n");
+            model.backend = ggml_backend_cpu_init();
+            if (!model.backend) {
+                fprintf(stderr, "%s: ggml_backend_cpu_init() failed\n", __func__);
+                return false;
+            }
+        }
+
+        model.buffer = ggml_backend_alloc_buffer(model.backend, buf_size);
     }
 
     // prepare memory for the weights
@@ -947,6 +948,8 @@ bool sam_ggml_model_load(const std::string & fname, sam_ggml_model & model) {
 
     // load weights
     {
+        ggml_allocr * alloc = ggml_allocr_new_from_buffer(model.buffer);
+
         int n_tensors = 0;
         size_t total_size = 0;
 
@@ -977,27 +980,28 @@ bool sam_ggml_model_load(const std::string & fname, sam_ggml_model & model) {
             std::string name(length, 0);
             fin.read(&name[0], length);
 
-            if (model.tensors.find(name.data()) == model.tensors.end()) {
-                fprintf(stderr, "%s: unknown tensor '%s' in model file\n", __func__, name.data());
+            if (model.tensors.find(name) == model.tensors.end()) {
+                fprintf(stderr, "%s: unknown tensor '%s' in model file\n", __func__, name.c_str());
                 return false;
             }
 
-            auto tensor = model.tensors[name.data()];
-            //printf("ne0 = %jd, ne1 = %jd, ne2 = %jd, ne3 = %jd\n", ne[0], ne[1], ne[2], ne[3]);
+            auto tensor = model.tensors[name];
+            ggml_set_name(tensor, name.c_str());
 
             if (ggml_nelements(tensor) != nelements) {
                 fprintf(stderr, "%s: tensor '%s' has wrong size in model file: got %d, expected %d\n",
-                        __func__, name.data(), (int) nelements, (int) ggml_nelements(tensor));
+                        __func__, name.c_str(), (int) nelements, (int) ggml_nelements(tensor));
                 return false;
             }
 
             if (tensor->ne[0] != ne[0] || tensor->ne[1] != ne[1] || tensor->ne[2] != ne[2] || tensor->ne[3] != ne[3]) {
                 fprintf(stderr, "%s: tensor '%s' has wrong shape in model file: got [%d, %d, %d, %d], expected [%d, %d, %d, %d]\n",
-                        __func__, name.data(),
+                        __func__, name.c_str(),
                         (int) ne[0], (int) ne[1], (int) ne[2], (int) ne[3],
                         (int) tensor->ne[0], (int) tensor->ne[1], (int) tensor->ne[2], (int) tensor->ne[3]);
                 return false;
             }
+
 
             size_t bpe = 0;
 
@@ -1019,6 +1023,7 @@ bool sam_ggml_model_load(const std::string & fname, sam_ggml_model & model) {
                 return false;
             }
 
+            ggml_allocr_alloc(alloc, tensor);
             fin.read(reinterpret_cast<char *>(tensor->data), ggml_nbytes(tensor));
 
             total_size += ggml_nbytes(tensor);
@@ -1036,6 +1041,8 @@ bool sam_ggml_model_load(const std::string & fname, sam_ggml_model & model) {
         fprintf(stderr, " done\n");
 
         fprintf(stderr, "%s: model size = %8.2f MB / num tensors = %d\n", __func__, total_size/1024.0/1024.0, n_tensors);
+
+        ggml_allocr_free(alloc);
     }
 
     fin.close();
@@ -1131,9 +1138,13 @@ struct ggml_cgraph  * sam_encode_image(
     const int32_t n_img_size    = hparams.n_img_size();
     const int32_t n_window_size = hparams.n_window_size();
 
+    // since we are using ggml-alloc, this buffer only needs enough space to hold the ggml_tensor and ggml_cgraph structs, but not the tensor data
+    static size_t buf_size = ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead();
+    static std::vector<uint8_t> buf(buf_size);
+
     struct ggml_init_params ggml_params = {
-        /*.mem_size   =*/ state.buf_compute_img_enc.size(),
-        /*.mem_buffer =*/ state.buf_compute_img_enc.data(),
+        /*.mem_size   =*/ buf.size(),
+        /*.mem_buffer =*/ buf.data(),
         /*.no_alloc   =*/ true, // skip allocating as we use ggml_alloc to allocate exact memory requirements
     };
 
@@ -1922,9 +1933,13 @@ struct ggml_cgraph  * sam_build_fast_graph(
                         int   ny,
                   sam_point   point) {
 
+    // since we are using ggml-alloc, this buffer only needs enough space to hold the ggml_tensor and ggml_cgraph structs, but not the tensor data
+    static size_t buf_size = ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead();
+    static std::vector<uint8_t> buf(buf_size);
+
     struct ggml_init_params ggml_params = {
-        /*.mem_size   =*/ state.buf_compute_fast.size(),
-        /*.mem_buffer =*/ state.buf_compute_fast.data(),
+        /*.mem_size   =*/ buf.size(),
+        /*.mem_buffer =*/ buf.data(),
         /*.no_alloc   =*/ true, // skip allocating as we use ggml_alloc to allocate exact memory requirements
     };
 
@@ -2008,20 +2023,21 @@ bool sam_compute_embd_img(const sam_image_u8 & img, int n_threads, sam_state & s
             model.hparams.n_img_embd(), model.hparams.n_img_embd(), model.hparams.n_enc_out_chans);
 
     // Encode the image
-    st.buf_compute_img_enc.resize(ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead());
-    st.allocr = ggml_allocr_new_measure(tensor_alignment);
+    const size_t alignment = ggml_backend_get_alignment(model.backend);
+    st.allocr = ggml_allocr_new_measure(alignment);
+
     struct ggml_cgraph * gf_measure = sam_encode_image(model, st, img1);
     if (!gf_measure) {
         fprintf(stderr, "%s: failed to encode image\n", __func__);
         return false;
     }
 
-    size_t alloc_size = ggml_allocr_alloc_graph(st.allocr, gf_measure) + tensor_alignment;
+    size_t alloc_size = ggml_allocr_alloc_graph(st.allocr, gf_measure) + alignment;
     ggml_allocr_free(st.allocr);
 
     // recreate allocator with exact memory requirements
-    st.buf_alloc_img_enc.resize(alloc_size);
-    st.allocr = ggml_allocr_new(st.buf_alloc_img_enc.data(), st.buf_alloc_img_enc.size(), tensor_alignment);
+    ggml_backend_buffer_t buf_compute = ggml_backend_alloc_buffer(model.backend, alloc_size);
+    st.allocr = ggml_allocr_new_from_buffer(buf_compute);
 
     // compute the graph with the measured exact memory requirements from above
     ggml_allocr_reset(st.allocr);
@@ -2034,11 +2050,12 @@ bool sam_compute_embd_img(const sam_image_u8 & img, int n_threads, sam_state & s
 
     ggml_allocr_alloc_graph(st.allocr, gf);
 
-    ggml_graph_compute_helper(st.work_buffer, gf, n_threads);
+    ggml_graph_compute_helper(model.backend, gf, n_threads);
 
     ggml_allocr_free(st.allocr);
-    st.allocr = NULL;
-    st.work_buffer.clear();
+    ggml_backend_buffer_free(buf_compute);
+
+    st.allocr = {};
 
     state.t_compute_img_ms = ggml_time_ms() - t_start_ms;
 
@@ -2077,8 +2094,8 @@ std::vector<sam_image_u8> sam_compute_masks(
     st.iou_predictions = ggml_new_tensor_1d(st.ctx_masks, GGML_TYPE_F32, 3);
 
 
-    st.buf_compute_fast.resize(ggml_tensor_overhead()*GGML_MAX_NODES + ggml_graph_overhead());
-    st.allocr = ggml_allocr_new_measure(tensor_alignment);
+    const size_t alignment = ggml_backend_get_alignment(model.backend);
+    st.allocr = ggml_allocr_new_measure(alignment);
 
     // measure memory requirements for the graph
     struct ggml_cgraph  * gf_measure = sam_build_fast_graph(model, st, img.nx, img.ny, pt);
@@ -2087,12 +2104,12 @@ std::vector<sam_image_u8> sam_compute_masks(
         return {};
     }
 
-    size_t alloc_size = ggml_allocr_alloc_graph(st.allocr, gf_measure) + tensor_alignment;
+    size_t alloc_size = ggml_allocr_alloc_graph(st.allocr, gf_measure) + alignment;
     ggml_allocr_free(st.allocr);
 
     // recreate allocator with exact memory requirements
-    st.buf_alloc_fast.resize(alloc_size);
-    st.allocr = ggml_allocr_new(st.buf_alloc_fast.data(), st.buf_alloc_fast.size(), tensor_alignment);
+    ggml_backend_buffer_t buf_compute = ggml_backend_alloc_buffer(model.backend, alloc_size);
+    st.allocr = ggml_allocr_new_from_buffer(buf_compute);
 
     // compute the graph with the measured exact memory requirements from above
     ggml_allocr_reset(st.allocr);
@@ -2105,18 +2122,18 @@ std::vector<sam_image_u8> sam_compute_masks(
 
     ggml_allocr_alloc_graph(st.allocr, gf);
 
-    ggml_graph_compute_helper(st.work_buffer, gf, n_threads);
+    ggml_graph_compute_helper(model.backend, gf, n_threads);
 
     //print_t_f32("iou_predictions", st.iou_predictions);
     //print_t_f32("low_res_masks", st.low_res_masks);
-    ggml_allocr_free(st.allocr);
-    st.allocr = {};
-    st.buf_compute_fast.clear();
-    st.buf_alloc_fast.clear();
 
     std::vector<sam_image_u8> masks = sam_postprocess_masks(model.hparams, img.nx, img.ny, st, mask_on_val, mask_off_val);
 
+    ggml_allocr_free(st.allocr);
     ggml_free(st.ctx_masks);
+    ggml_backend_buffer_free(buf_compute);
+
+    st.allocr = {};
     st.ctx_masks = {};
     st.low_res_masks = {};
     st.iou_predictions = {};
@@ -2133,5 +2150,12 @@ void sam_deinit(sam_state & state) {
         }
         state.model.reset();
         state.state.reset();
+    }
+
+    if (state.model) {
+        if (state.model->backend) {
+            ggml_backend_free(state.model->backend);
+            ggml_backend_buffer_free(state.model->buffer);
+        }
     }
 }
