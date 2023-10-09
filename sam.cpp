@@ -2032,7 +2032,7 @@ bool sam_compute_embd_img(const sam_image_u8 & img, int n_threads, sam_state & s
         return false;
     }
 
-    size_t alloc_size = ggml_allocr_alloc_graph(st.allocr, gf_measure) + alignment;
+    size_t alloc_size = ggml_allocr_alloc_graph(st.allocr, gf_measure);
     ggml_allocr_free(st.allocr);
 
     // recreate allocator with exact memory requirements
@@ -2104,7 +2104,7 @@ std::vector<sam_image_u8> sam_compute_masks(
         return {};
     }
 
-    size_t alloc_size = ggml_allocr_alloc_graph(st.allocr, gf_measure) + alignment;
+    size_t alloc_size = ggml_allocr_alloc_graph(st.allocr, gf_measure);
     ggml_allocr_free(st.allocr);
 
     // recreate allocator with exact memory requirements
