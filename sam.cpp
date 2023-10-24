@@ -1706,7 +1706,6 @@ bool sam_decode_mask(
     {
         // ConvTranspose2d
         keys = ggml_conv_transpose_2d_p0(ctx0, dec.output_upscaling_0_w, keys, 2);
-        ggml_allocr_alloc(state.allocr, keys); // TODO: This alloc shouldn't be needed
         keys = ggml_add_inplace(ctx0, keys, ggml_repeat(ctx0,
                                      ggml_reshape_3d(ctx0, dec.output_upscaling_0_b, 1, 1, dec.output_upscaling_0_b->ne[0]),
                                      keys));
@@ -1718,7 +1717,6 @@ bool sam_decode_mask(
 
         // ConvTranspose2d
         keys = ggml_conv_transpose_2d_p0(ctx0, dec.output_upscaling_3_w, keys, 2);
-        ggml_allocr_alloc(state.allocr, keys); // TODO: This alloc shouldn't be needed
         keys = ggml_add_inplace(ctx0, ggml_repeat(ctx0,
                                 ggml_reshape_3d(ctx0, dec.output_upscaling_3_b, 1, 1, dec.output_upscaling_3_b->ne[0]),
                                 keys), keys);
