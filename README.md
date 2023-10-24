@@ -13,11 +13,14 @@ cd sam.cpp
 Note: you need to download the model checkpoint below (`sam_vit_b_01ec64.pth`) first from [here](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth) and place it in the `checkpoints` folder
 
 ```bash
-# Convert PTH model to ggml. Requires python3, torch and numpy
-python convert-pth-to-ggml.py checkpoints/sam_vit_b_01ec64.pth . 1
+# Download PTH model and place it under checkpoints
+mkdir checkpoints
+wget -P checkpoints https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 
-# You need CMake and SDL2
-SDL2 - Used for GUI windows & input [libsdl](https://www.libsdl.org)
+# Convert PTH model to ggml. Requires python3, torch and numpy
+python convert-pth-to-ggml.py checkpoints/sam_vit_b_01ec64.pth checkpoints 1
+
+# You need CMake and SDL2 - Used for GUI windows & input [libsdl](https://www.libsdl.org)
 
 [Ubuntu]
 $ sudo apt install libsdl2-dev

@@ -113,8 +113,7 @@ static bool load_image_from_file(const std::string & fname, sam_image_u8 & img) 
         return false;
     }
     if (nc != 3) {
-        fprintf(stderr, "%s: '%s' has %d channels (expected 3)\n", __func__, fname.c_str(), nc);
-        return false;
+        fprintf(stdout, "%s: converted '%s' %d channels to 3\n", __func__, fname.c_str(), nc);
     }
 
     img.nx = nx;
